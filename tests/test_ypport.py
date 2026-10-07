@@ -126,6 +126,26 @@ class SniffTests(unittest.TestCase):
                 os.remove(f.name)
 
 
+class ElfTests(unittest.TestCase):
+    LIBC = "/lib/x86_64-linux-gnu/libc.so.6"
+
+    @unittest.skipUnless(os.path.exists(LIBC), "needs an x86_64 glibc")
+    def test_elf_exports(self):
+        names = ypport.elf_exports(self.LIBC)
+        self.assertIn("printf", names)
+        self.assertIn("dlopen", names)
+
+    def test_elf_exports_rejects_non_elf(self):
+        self.assertIsNone(ypport.elf_exports(__file__))
+
+    def test_theorafile_api_level(self):
+        base = {"tf_fopen", "tf_videoinfo", "tf_readvideo"}
+        self.assertTrue(ypport.theorafile_api_level(base).startswith("pre-2021"))
+        self.assertTrue(ypport.theorafile_api_level(base | {"tf_setaudiotrack"}).startswith("2021-04"))
+        self.assertTrue(ypport.theorafile_api_level(base | {"tf_setaudiotrack", "tf_setvideotrack"})
+                        .startswith("2021-12"))
+
+
 class RewriteTests(unittest.TestCase):
     def test_unpin_dllmaps(self):
         src = ('<configuration>\n'

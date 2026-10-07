@@ -86,6 +86,40 @@ def sniff(path):
     return None, None
 
 
+def elf_exports(path):
+    """Names of the defined dynamic symbols of a 64-bit little-endian ELF
+    shared object, or None if the file is not one."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except (IOError, OSError):
+        return None
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return None
+    try:
+        shoff, = struct.unpack_from("<Q", data, 0x28)
+        shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+        sections = []
+        for i in range(shnum):
+            sh = struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize)
+            sections.append(sh)
+        names = set()
+        for sh in sections:
+            if sh[1] != 11:  # SHT_DYNSYM
+                continue
+            offset, size, link, entsize = sh[4], sh[5], sh[6], sh[9] or 24
+            stroff = sections[link][4]
+            for j in range(size // entsize):
+                st_name, st_info, _other, st_shndx = struct.unpack_from("<IBBH", data, offset + j * entsize)
+                if st_shndx == 0 or not st_name or (st_info >> 4) not in (1, 2):  # undefined / local
+                    continue
+                end = data.index(b"\0", stroff + st_name)
+                names.add(data[stroff + st_name:end].decode("ascii", "replace"))
+        return names
+    except (struct.error, IndexError, ValueError):
+        return None
+
+
 def file_contains(path, needles, chunk=1 << 20):
     """Return the subset of byte strings in `needles` found in the file."""
     found = set()
@@ -580,6 +614,27 @@ class Assembly(object):
             out.setdefault(mods[scope - 1], set()).add(entry)
         return dict((k, sorted(v)) for k, v in out.items())
 
+    def delegate_param_counts(self, prefix):
+        """{delegate type name: parameter count of Invoke} for delegate types
+        whose name starts with prefix (MonoGame FuncLoader style bindings)."""
+        typedefs = self.table(0x02)
+        methods = self.table(0x06)
+        out = {}
+        for i, td in enumerate(typedefs):
+            name = self.string(td[1])
+            if not name.startswith(prefix):
+                continue
+            first = td[5]
+            last = typedefs[i + 1][5] if i + 1 < len(typedefs) else len(methods) + 1
+            for midx in range(first, last):
+                if self.string(methods[midx - 1][3]) != "Invoke":
+                    continue
+                sig = self.blob(methods[midx - 1][4])
+                if len(sig) >= 2:
+                    count, _ = _compressed_uint(sig, 1)
+                    out[name] = count
+        return out
+
     def type_defs(self):
         return [(self.string(r[2]), self.string(r[1])) for r in self.table(0x02)]
 
@@ -724,6 +779,17 @@ def classify_native(name):
         if re.search(rx, name, re.I):
             return key, desc
     return None, None
+
+
+def theorafile_api_level(exports):
+    """Which FNA Theorafile API generation a library exports."""
+    if "tf_setvideotrack" in exports:
+        return "2021-12+ (multiple video tracks)"
+    if "tf_setaudiotrack" in exports:
+        return "2021-04+ (multiple audio tracks)"
+    if "tf_videoinfo" in exports:
+        return "pre-2021"
+    return "unknown"
 
 
 def fmod_version_str(num):
@@ -895,6 +961,17 @@ def inspect_dir(root, skip=()):
 
     report["content_dirs"] = sorted(top_dirs)
 
+    for item in report["native_libs"]:
+        if item["format"] != "elf" or "!/" in item["path"]:
+            continue
+        key, _ = classify_native(os.path.basename(item["path"]))
+        if key in ("theora", "fmod", "steam_api"):
+            exports = elf_exports(os.path.join(root, *item["path"].split("/")))
+            if exports is not None:
+                item["exports"] = len(exports)
+                if key == "theora":
+                    item["theorafile_api"] = theorafile_api_level(exports)
+
     # Managed assemblies -------------------------------------------------
     for src in managed_sources:
         if src.loader is None and src._asm is False:
@@ -938,6 +1015,9 @@ def inspect_dir(root, skip=()):
                     entry["steamworks_wrapper"] = "Steamworks.NET"
                 elif ("Steamworks", "SteamClient") in types:
                     entry["steamworks_wrapper"] = "Facepunch.Steamworks"
+                tf = asm.delegate_param_counts("d_tf_")
+                if tf:
+                    entry["theorafile_binding"] = tf
             except (struct.error, ValueError, IndexError, KeyError) as e:
                 entry["error"] = "metadata: %s" % e
         report["managed"].append(entry)
@@ -1025,6 +1105,20 @@ def _summarise(report):
         for r in main.get("references", []):
             if r[0] in ("MonoGame.Framework", "FNA"):
                 report["engine"] = {"name": r[0], "version": r[1], "flavor": None, "path": None}
+
+    report["theorafile"] = None
+    binding = {}
+    for m in app:
+        binding.update(m.get("theorafile_binding", {}))
+    libs = [n for n in report["native_libs"] if n.get("theorafile_api")]
+    if binding or libs:
+        vi = binding.get("d_tf_videoinfo")
+        report["theorafile"] = {
+            "binding": binding,
+            "videoinfo_params": vi,
+            "videoinfo_api": {4: "pre-2020 (no pixel format)", 5: "2020+ (pixel format)"}.get(vi),
+            "shipped_library_api": libs[0]["theorafile_api"] if libs else None,
+        }
 
     fmod = sorted(set(m["fmod_header_version"] for m in app if m.get("fmod_header_version")))
     report["fmod_header_version"] = fmod[0] if fmod else None
@@ -1130,6 +1224,12 @@ def print_report(r, out=sys.stdout):
         w("  engine: %s %s, flavor %s\n" % (e["name"], e["version"], e["flavor"]))
     if r["fmod_header_version"]:
         w("  FMOD C# wrapper header version: %s\n" % r["fmod_header_version"])
+    if r.get("theorafile"):
+        t = r["theorafile"]
+        w("  Theorafile (video): binding tf_videoinfo %s params -> %s; shipped library: %s\n" % (
+            t["videoinfo_params"], t["videoinfo_api"], t["shipped_library_api"]))
+        if t["binding"]:
+            w("    bound functions: %s\n" % ", ".join(sorted(n[2:] for n in t["binding"])))
     app = [m for m in r["managed"] if not m["framework_assembly"]]
     fw = [m for m in r["managed"] if m["framework_assembly"]]
     w("  app assemblies (%d):\n" % len(app))
@@ -1154,7 +1254,8 @@ def print_report(r, out=sys.stdout):
     w("\nNative libraries shipped\n------------------------\n")
     for n in r["native_libs"]:
         key, _ = classify_native(os.path.basename(n["path"]))
-        w("  %-60s %-6s %-8s %s\n" % (n["path"][-60:], n["format"], n["arch"], key or ""))
+        extra = (" (%d exports)" % n["exports"]) if n.get("exports") else ""
+        w("  %-60s %-6s %-8s %s%s\n" % (n["path"][-60:], n["format"], n["arch"], key or "", extra))
     for note in r["notes"]:
         w("\nnote: %s\n" % note)
     w("\nVerdict\n-------\n")
@@ -1178,8 +1279,11 @@ class PrepareError(Exception):
 
 
 class Preparer(object):
-    def __init__(self, gamedir, framework_dir=None, log=print, dry_run=False):
+    def __init__(self, gamedir, framework_dir=None, log=print, dry_run=False, native_dirs=(),
+                 native_arch="aarch64"):
         self.root = os.path.abspath(gamedir)
+        self.native_dirs = [d for d in native_dirs if d and os.path.isdir(d)]
+        self.native_arch = native_arch
         self.state_dir = os.path.join(self.root, STATE_DIR)
         self.backup_dir = os.path.join(self.state_dir, "backup")
         self.framework_dir = framework_dir
@@ -1288,6 +1392,7 @@ class Preparer(object):
             env = self._prepare_dotnet(report, main)
         else:
             env = self._prepare_mono(report, main)
+        self._install_replacements()
 
         engine = report["engine"] or {}
         env.update({
@@ -1438,6 +1543,31 @@ class Preparer(object):
         return {"YP_MODE": "mono", "YP_ENTRY": main, "YP_APPDIR": app_dir or "."}
 
     # -- natives -------------------------------------------------------------
+    def _install_replacements(self):
+        """Put an aarch64 build next to the game wherever an x86_64 library
+        with the same file name was parked. Search paths would find them on
+        LD_LIBRARY_PATH anyway; this also covers code that dlopen()s a
+        library by absolute path inside the game folder."""
+        if not self.native_dirs:
+            return
+        self.log("Installing %s replacements ..." % self.native_arch)
+        for rel in list(self.state["moved"]):
+            base = os.path.basename(rel)
+            if base in RUNTIME_NATIVE_FILES:
+                continue
+            for d in self.native_dirs:
+                src = os.path.join(d, base)
+                if not os.path.isfile(src) or sniff(src) != ("elf", self.native_arch):
+                    continue
+                dst = self._abs(rel)
+                if not os.path.exists(dst):
+                    self.log("  install %-53s (from %s)" % (rel, d))
+                    if not self.dry_run:
+                        shutil.copy2(src, dst)
+                        self.state["created"].append(rel)
+                        self._save_state()
+                break
+
     def _park_foreign_natives(self, report):
         self.log("Parking foreign-architecture native files ...")
         for item in report["native_libs"] + report["runtime_files"] + report["apphosts"]:
@@ -1498,14 +1628,17 @@ def unpin_dllmaps(text):
 
 
 def fingerprint(root, state):
-    """Changes when the user copies a different game build over the folder."""
+    """Changes when the user copies a different (or the same) game build over
+    a prepared folder: every file prepare touched is part of it."""
     h = hashlib.sha1()
-    main = state["main"]
-    st = os.stat(os.path.join(root, *main.split("/")))
-    h.update(("%s:%d:%d\n" % (main, st.st_size, int(st.st_mtime))).encode())
-    for rel in sorted(state.get("moved", [])):
-        # A parked file showing up again means the game was copied again.
-        h.update(("%s:%d\n" % (rel, os.path.exists(os.path.join(root, *rel.split("/"))))).encode())
+    paths = [state["main"]] + sorted(set(state.get("moved", []) + state.get("created", []) +
+                                         state.get("rewritten", [])))
+    for rel in paths:
+        try:
+            st = os.stat(os.path.join(root, *rel.split("/")))
+            h.update(("%s:%d:%d\n" % (rel, st.st_size, int(st.st_mtime))).encode())
+        except OSError:
+            h.update(("%s:-\n" % rel).encode())
     return h.hexdigest()
 
 
@@ -1597,6 +1730,11 @@ def main(argv=None):
     p.add_argument("dir")
     p.add_argument("--framework-dir", help="shared/Microsoft.NETCore.App/<ver> of the target runtime")
     p.add_argument("--app", help="name of the game executable when several are present")
+    p.add_argument("--native-dir", action="append", default=[],
+                   help="folder with aarch64 libraries to install in place of parked x86_64 ones "
+                        "(repeatable, first match wins)")
+    p.add_argument("--native-arch", default="aarch64",
+                   help="architecture of the --native-dir libraries (tests on a PC use x86_64)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true", help="restore first if already prepared")
 
@@ -1635,7 +1773,8 @@ def main(argv=None):
             restore(args.dir)
         t0 = time.time()
         try:
-            Preparer(args.dir, framework_dir=args.framework_dir, dry_run=args.dry_run).run(app_name=args.app)
+            Preparer(args.dir, framework_dir=args.framework_dir, dry_run=args.dry_run,
+                     native_dirs=args.native_dir, native_arch=args.native_arch).run(app_name=args.app)
         except (PrepareError, BundleError) as e:
             print("ERROR: %s" % e)
             return 3

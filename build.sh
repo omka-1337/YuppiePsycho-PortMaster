@@ -3,8 +3,8 @@
 #
 #   ./build.sh
 #
-# Needs: python3, zip, curl, and zig (`pip install ziglang`) or an aarch64
-# cross compiler in $CC for the Steam stub. Third-party aarch64 binaries
+# Needs: python3, zip, curl, git, and zig (`pip install ziglang`) or an
+# aarch64 cross compiler in $CC for the Steam stub and Theorafile. Third-party aarch64 binaries
 # (gl4es, OpenAL Soft, FMOD) are taken from PortMaster-New at a pinned commit
 # and checked against SHA-256 sums.
 set -euo pipefail
@@ -24,7 +24,8 @@ DEPS=(
   "stardewvalleymainline/stardewvalleymainline/gl4es.aarch64/libEGL.so.1 287d8fd88704c2429218467426b46a2ddbb7f8ac735aa5fb5ecb9fdbe1026876 gl4es.aarch64/libEGL.so.1"
   "stardewvalleymainline/stardewvalleymainline/licenses/LICENSE.GL4ES.txt 69a3049c77abd88658f6ad7cf6a5b6ceb5cf03b80e60f7c4657d90322cfab7bd licenses/LICENSE.gl4es.txt"
   # OpenAL Soft 1.23.1 (SDL2 backend)
-  "belleboomerang/belleboomerang/libs/libopenal.so.1 8f7842c6ca2316b11a933e258813725bfa75c4fb676eccdc2439be27f37a1c2b libs.aarch64/libopenal.so.1"
+  # (MonoGame 3.8.2+ loads libopenal.so, older versions libopenal.so.1)
+  "belleboomerang/belleboomerang/libs/libopenal.so.1 8f7842c6ca2316b11a933e258813725bfa75c4fb676eccdc2439be27f37a1c2b libs.aarch64/libopenal.so.1 libs.aarch64/libopenal.so"
   # FMOD Engine 2.02.18 (SONAME libfmod.so.13 / libfmodstudio.so.13)
   "celeste64/celeste64/libfmod.so 440556e5948d78dc60d08267afd8031065fe435a572bdb85954dafec2bd05ba3 libs.aarch64/libfmod.so libs.aarch64/libfmod.so.13"
   "celeste64/celeste64/libfmodstudio.so 2d8e5608c1d6fff3700c0a6659d2553fcd399d3676c8bed3ea22e60c963d2636 libs.aarch64/libfmodstudio.so libs.aarch64/libfmodstudio.so.13"
@@ -60,6 +61,13 @@ echo "== Steam stub"
 "$REPO/src/steamstub/build.sh" "$REPO/build/steamstub" aarch64
 cp "$REPO/build/steamstub/aarch64/"*.so "$PORT/libs.aarch64/"
 
+echo "== Theorafile"
+THEORAFILE_SRC="$REPO/build/theorafile-src" "$REPO/src/theorafile/build.sh" "$REPO/build/theorafile" aarch64
+cp "$REPO/build/theorafile/aarch64/libtheorafile.so" "$PORT/libs.aarch64/"
+for f in "$REPO/build/theorafile-src/licenses/"*; do
+  cp "$f" "$PORT/licenses/theorafile-$(basename "$f").txt"
+done
+
 echo "== licenses"
 cp "$REPO/LICENSE" "$PORT/licenses/LICENSE.port.txt"
 cat > "$PORT/licenses/NOTICE.txt" << 'EOF'
@@ -71,6 +79,10 @@ gl4es (libGL.so.1, libEGL.so.1) - MIT, see LICENSE.gl4es.txt
 
 OpenAL Soft 1.23.1 (libopenal.so.1) - LGPL-2.0-or-later
   https://github.com/kcat/openal-soft  (source: https://openal-soft.org/openal-releases/)
+
+Theorafile (libtheorafile.so) - zlib license; bundles libogg, libvorbis and
+  libtheora (BSD-style licenses). See theorafile-*.txt.
+  https://github.com/FNA-XNA/Theorafile
 
 FMOD Engine 2.02.18 (libfmod.so*, libfmodstudio.so*)
   Made with FMOD Studio by Firelight Technologies Pty Ltd.

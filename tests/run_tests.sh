@@ -5,7 +5,9 @@
 # game can ship with, then for each one: inspect -> prepare -> run the result
 # with the framework-dependent host -> status -> restore -> byte-compare with
 # the original. Needs a .NET 8 SDK on PATH (net6.0 targets are fetched from
-# NuGet) and network access to nuget.org.
+# NuGet) and network access to nuget.org. With zig (pip install ziglang) the
+# Steam stub and Theorafile are built for the host and exercised as well; with
+# ffmpeg a Theora video is generated and decoded through the C# binding.
 #
 #   tests/run_tests.sh [workdir]
 
@@ -27,6 +29,26 @@ bad() { echo "  FAIL: $*"; fail=$((fail + 1)); }
 mkdir -p "$WORK/src" "$WORK/out" "$WORK/run"
 cp -r "$HERE/testgame/." "$WORK/src/"
 
+# Host builds of the port's native pieces. On the device these are aarch64;
+# here they stand in as "replacements" for the libraries a game ships.
+NATIVES="$WORK/natives/x86_64"
+NATIVE_ARGS=()
+echo "== native helpers"
+if "$REPO/src/steamstub/build.sh" "$WORK/natives" x86_64 > "$WORK/natives.log" 2>&1 &&
+   THEORAFILE_SRC="$WORK/theorafile-src" "$REPO/src/theorafile/build.sh" "$WORK/natives" x86_64 \
+     >> "$WORK/natives.log" 2>&1; then
+  NATIVE_ARGS=(--native-dir "$NATIVES" --native-arch x86_64)
+  ok "Steam stub and Theorafile built for the host"
+else
+  echo "  SKIP: cannot build native helpers (needs zig: pip install ziglang), see $WORK/natives.log"
+fi
+VIDEO=""
+if command -v ffmpeg > /dev/null && [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
+  VIDEO="$WORK/test.ogv"
+  ffmpeg -loglevel error -y -f lavfi -i testsrc=size=320x180:rate=30 -f lavfi -i sine=frequency=440 \
+    -t 2 -pix_fmt yuv420p -c:v libtheora -c:a libvorbis "$VIDEO" || VIDEO=""
+fi
+
 publish() { # name, extra args...
   local name="$1"; shift
   if [ ! -d "$WORK/out/$name" ]; then
@@ -47,31 +69,47 @@ roundtrip() { # name, expected-runtime-kind
   python3 "$YPPORT" inspect --json "$dir" > "$WORK/run/$name.inspect.json"
   local rc=$?
   [ $rc -eq 0 ] && ok "inspect says portable" || bad "inspect exit $rc"
-  python3 - "$WORK/run/$name.inspect.json" "$kind" <<'EOF' && ok "inspect: kind/engine/fmod" || bad "inspect details"
+  python3 - "$WORK/run/$name.inspect.json" "$kind" <<'EOF' && ok "inspect: kind/engine/fmod/theorafile" || bad "inspect details"
 import json, sys
 r = json.load(open(sys.argv[1]))
 assert r["runtime_kind"] == sys.argv[2], r["runtime_kind"]
 assert r["engine"]["name"] == "MonoGame.Framework" and r["engine"]["flavor"] == "DesktopGL", r["engine"]
 assert r["fmod_header_version"] == "2.02.18", r["fmod_header_version"]
-for key in ("fmod", "steam_api", "sdl2", "openal"):
+for key in ("fmod", "steam_api", "sdl2", "openal", "theora"):
     assert key in r["native_needs"], key
+assert r["theorafile"]["videoinfo_params"] == 5, r["theorafile"]
 EOF
 
-  python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" > "$WORK/run/$name.prepare.log" 2>&1 \
+  python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" "${NATIVE_ARGS[@]}" > "$WORK/run/$name.prepare.log" 2>&1 \
     && ok "prepare" || { bad "prepare (see $WORK/run/$name.prepare.log)"; return; }
   # shellcheck disable=SC1090
   ( . "$dir/.ypport/launch.env"
-    cd "$dir/$YP_APPDIR" && "$DOTNET" "$(basename "$YP_ENTRY")" --smoke ) > "$WORK/run/$name.smoke.log" 2>&1
+    cd "$dir/$YP_APPDIR" && YP_TEST_VIDEO="$VIDEO" LD_LIBRARY_PATH="$NATIVES" \
+      "$DOTNET" "$(basename "$YP_ENTRY")" --smoke ) > "$WORK/run/$name.smoke.log" 2>&1
   if grep -q "SMOKE OK" "$WORK/run/$name.smoke.log" && grep -q "runtime: .NET 8" "$WORK/run/$name.smoke.log"; then
     ok "runs on $(grep 'runtime:' "$WORK/run/$name.smoke.log" | cut -d' ' -f2-)"
   else
     bad "smoke run:"; sed 's/^/      /' "$WORK/run/$name.smoke.log" | head -20
   fi
-  if find "$dir" -path "$dir/.ypport" -prune -o -type f -print0 | xargs -0 -r file | grep -q 'ELF.*x86-64'; then
-    bad "x86-64 ELF files left in the game folder"
-  else
-    ok "no x86-64 ELF left"
+  if [ -n "$VIDEO" ]; then
+    grep -q "video decoded: 320x180 fmt 0, 6[01] frames" "$WORK/run/$name.smoke.log" \
+      && ok "Theora video decoded through the C# binding" || bad "video decode"
   fi
+  # Only the replacements installed by prepare may be x86-64 here.
+  python3 - "$dir" <<'EOF' && ok "no foreign x86-64 ELF left" || bad "x86-64 ELF files left in the game folder"
+import json, os, sys
+root = sys.argv[1]
+created = set(json.load(open(os.path.join(root, ".ypport", "state.json")))["created"])
+for dp, dn, fn in os.walk(root):
+    if ".ypport" in dn:
+        dn.remove(".ypport")
+    for f in fn:
+        rel = os.path.relpath(os.path.join(dp, f), root)
+        with open(os.path.join(dp, f), "rb") as fh:
+            head = fh.read(20)
+        if head[:4] == b"\x7fELF" and head[18] == 0x3E and rel not in created:
+            sys.exit("left: " + rel)
+EOF
   python3 "$YPPORT" status "$dir" && ok "status: prepared" || bad "status after prepare"
   python3 "$YPPORT" prepare "$dir" > /dev/null 2>&1 && bad "second prepare accepted" || ok "second prepare refused"
   python3 "$YPPORT" restore "$dir" > /dev/null && diff -r "$WORK/out/$name" "$dir" > /dev/null \
@@ -86,22 +124,39 @@ publish sc-r2r         $LX -p:PublishReadyToRun=true
 publish fd-portable    -p:SelfContained=false
 publish win-sf         -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:PublishSingleFile=true \
                        -p:IncludeNativeLibrariesForSelfExtract=true
+# Same shape as the Steam Linux build of Yuppie Psycho: self-contained .NET 8,
+# loose files, x86_64 libtheorafile.so and libsteam_api.so next to the game.
+if [ ! -d "$WORK/out/sc-net8" ] && publish sc-net8 $LX -p:TargetFramework=net8.0 && [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
+  cp "$NATIVES/libtheorafile.so" "$NATIVES/libsteam_api.so" "$WORK/out/sc-net8/"
+fi
 
 roundtrip sf-compressed dotnet
 roundtrip sf-net8       dotnet
 roundtrip sc-r2r        dotnet
 roundtrip fd-portable   dotnet
 roundtrip win-sf        dotnet
+roundtrip sc-net8       dotnet
+if [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
+  python3 - "$WORK/run/sc-net8.prepare.log" <<'EOF' && ok "sc-net8: shipped libraries replaced in place" || bad "sc-net8 replacements"
+import sys
+log = open(sys.argv[1]).read()
+for lib in ("libtheorafile.so", "libsteam_api.so", "libSDL2-2.0.so.0"):
+    assert "park " + lib in log, lib
+for lib in ("libtheorafile.so", "libsteam_api.so"):
+    assert "install " + lib in log, lib
+assert "install libSDL2" not in log  # no replacement shipped: the system SDL2 is used
+EOF
+fi
 
-# The Steam stub, built for the host, must satisfy Steamworks.NET in both modes.
+# The Steam stub must satisfy Steamworks.NET in both modes.
 echo "== steam stub"
-if "$REPO/src/steamstub/build.sh" "$WORK/stub" x86_64 > "$WORK/stub.log" 2>&1; then
+if [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
   for v in sf-compressed win-sf; do
     dir="$WORK/run/stub-$v"; rm -rf "$dir"; cp -a "$WORK/out/$v" "$dir"
     python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" > /dev/null 2>&1
     for mode in off fake; do
       log="$WORK/run/stub-$v-$mode.log"
-      (cd "$dir" && YP_STEAM_STUB=$mode LD_LIBRARY_PATH="$WORK/stub/x86_64" \
+      (cd "$dir" && YP_STEAM_STUB=$mode LD_LIBRARY_PATH="$NATIVES" \
         "$DOTNET" TestGame.dll --smoke) > "$log" 2>&1
       want="steam init: False"; [ $mode = fake ] && want="steam achievement: False"
       grep -q "$want" "$log" && grep -q "SMOKE OK" "$log" && ok "$v with stub ($mode)" \
@@ -109,18 +164,25 @@ if "$REPO/src/steamstub/build.sh" "$WORK/stub" x86_64 > "$WORK/stub.log" 2>&1; t
     done
   done
 else
-  echo "  SKIP: cannot build the stub (needs zig: pip install ziglang)"
+  echo "  SKIP: no native helpers"
 fi
 
-# A copied-over game update must invalidate the prepared state.
+# A copied-over game must invalidate the prepared state, also when only an
+# installed replacement library got overwritten.
 echo "== update detection"
-dir="$WORK/run/update"; rm -rf "$dir"; cp -a "$WORK/out/sf-compressed" "$dir"
-python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" > /dev/null 2>&1
-cp -a "$WORK/out/sf-compressed/." "$dir/"
+dir="$WORK/run/update"; rm -rf "$dir"; cp -a "$WORK/out/sc-net8" "$dir"
+python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" "${NATIVE_ARGS[@]}" > /dev/null 2>&1
+python3 "$YPPORT" status "$dir" && ok "status: prepared" || bad "status after prepare"
+cp -a "$WORK/out/sc-net8/." "$dir/"
 python3 "$YPPORT" status "$dir" && bad "status ignores re-copied game" || ok "status notices re-copied game"
 python3 "$YPPORT" reset "$dir" > /dev/null
-python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" > /dev/null 2>&1 && ok "prepare after reset" \
-  || bad "prepare after reset"
+python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" "${NATIVE_ARGS[@]}" > /dev/null 2>&1 \
+  && ok "prepare after reset" || bad "prepare after reset"
+if [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
+  touch -d '2001-01-01' "$dir/libtheorafile.so"
+  python3 "$YPPORT" status "$dir" && bad "status ignores changed replacement" \
+    || ok "status notices a changed replacement library"
+fi
 
 # NativeAOT builds carry no IL; they must be recognised and refused.
 echo "== nativeaot"

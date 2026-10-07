@@ -4,10 +4,11 @@ A **native** aarch64 port of *Yuppie Psycho: Executive Edition* for Linux handhe
 [PortMaster](https://portmaster.games) (developed on an Anbernic RG40XX H with ROCKNIX). No x86
 emulation: the game's own code runs on an aarch64 .NET runtime.
 
-> **Status: experimental, not yet run against the real game.** Every piece is tested against real
-> .NET SDK output and a MonoGame stand-in game (see [Testing](#testing)), but the actual Yuppie
-> Psycho files and the device have not been in the loop yet. The first step is to run the
-> inspector on your copy of the game, see [Step 1](#step-1-inspect-your-copy-of-the-game).
+> **Status: experimental, not yet booted on a device.** The inspector has been run on the real
+> Steam Linux build: it is a self-contained **.NET 8** MonoGame 3.8.3 DesktopGL app with IL game
+> code (no NativeAOT), FMOD Core 2.02, Theorafile video and Steamworks.NET 20.1, which the port
+> covers. Every piece is tested against real .NET SDK output and a MonoGame stand-in game with the
+> same shape (see [Testing](#testing)); running on the RG40XX H is the next step.
 
 ## Why a native port is possible
 
@@ -18,11 +19,12 @@ therefore CIL bytecode, which is CPU independent. What ties the PC release to x8
 
 | x86_64-only piece | What the port does |
 |--|--|
-| .NET apphost / single-file bundle (the executable) | extracts the IL assemblies from the bundle |
+| .NET apphost (the executable), possibly a single-file bundle | sets it aside; extracts the IL assemblies if it is a bundle |
 | Bundled .NET runtime (`libcoreclr.so`, `System.Private.CoreLib.dll`, ...) | sets it aside, uses PortMaster's aarch64 .NET 8 runtime instead |
 | `runtimeconfig.json` / `deps.json` describing a self-contained x86_64 app | rewrites them for a framework-dependent app with roll-forward |
 | `libSDL2`, `libopenal` | uses aarch64 builds (system SDL2, bundled OpenAL Soft) |
 | `libfmod`, `libfmodstudio` | bundles aarch64 FMOD 2.02.18 (user-replaceable) |
+| `libtheorafile` (cutscene video) | builds FNA's Theorafile for aarch64 |
 | `libsteam_api` (Valve ships no ARM build) | bundles a stub exporting the full flat Steam API |
 
 The one case where this does **not** work is a NativeAOT build, where the IL has been compiled
@@ -39,6 +41,7 @@ port/                         files that go into the PortMaster package
   yuppiepsycho/tools/ypport.py      inspect / extract / prepare / restore (stdlib-only Python)
   yuppiepsycho/tools/patchscript    first-launch setup run by PortMaster's patcher UI
 src/steamstub/                Steam API stub (C, generated from the wrappers' P/Invoke tables)
+src/theorafile/               aarch64 build of FNA's Theorafile (pinned commit, struct-size check)
 tests/                        end-to-end tests, unit tests, launcher simulation, stand-in game
 build.sh                      builds dist/yuppiepsycho.zip
 docs/TECHNICAL.md             how each step works, decisions, open questions
@@ -72,8 +75,8 @@ pip install ziglang     # cross compiler for the aarch64 Steam stub
 ./build.sh              # -> dist/yuppiepsycho.zip
 ```
 
-`build.sh` compiles the Steam stub and downloads the aarch64 gl4es, OpenAL Soft and FMOD
-binaries from [PortMaster-New](https://github.com/PortsMaster/PortMaster-New) at a pinned commit,
+`build.sh` compiles the Steam stub and Theorafile and downloads the aarch64 gl4es, OpenAL Soft
+and FMOD binaries from [PortMaster-New](https://github.com/PortsMaster/PortMaster-New) at a pinned commit,
 verifying their SHA-256 sums.
 
 ## Step 3: install on the device
@@ -96,14 +99,14 @@ the setup refuses a build). Per-user settings go into `ports/yuppiepsycho/settin
 | Test | What it proves | Needs |
 |--|--|--|
 | `python3 -m unittest discover -s tests -p 'test_*.py'` | bundle parser (incl. path-traversal and range checks), deps.json/dllmap rewriting | Python 3 |
-| `tests/run_tests.sh` | publishes a MonoGame 3.8.1 + FMOD wrapper + Steamworks.NET stand-in game in six packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, NativeAOT), then inspect -> prepare -> **run on .NET 8** -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes | .NET 8 SDK, zig |
-| `tests/launcher_sim.sh` | runs the real `YuppiePsycho.sh` on x86_64 inside a fake PortMaster install: first-launch setup, second launch without setup, library paths, Steam stub | .NET 8 SDK |
+| `tests/run_tests.sh` | publishes a MonoGame + FMOD wrapper + Steamworks.NET + Theorafile-binding stand-in game in seven packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, **self-contained .NET 8 with shipped x86_64 libraries like Yuppie Psycho**, NativeAOT), then inspect -> prepare -> **run on .NET 8** (incl. decoding a Theora video through the C# binding) -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes; update detection | .NET 8 SDK, zig, ffmpeg |
+| `tests/launcher_sim.sh` | runs the real `YuppiePsycho.sh` on x86_64 inside a fake PortMaster install: first-launch setup with library replacement, second launch without setup, Steam stub, video | .NET 8 SDK |
 
-Current result: 48/48 end-to-end checks and 9/9 unit tests pass.
+Current result: 66/66 end-to-end checks and 12/12 unit tests pass.
 
 What the tests cannot cover is listed in [docs/TECHNICAL.md](docs/TECHNICAL.md#open-questions):
-the real game's packaging, rendering on the Mali-G31 GPU, memory on a 1 GB device, video
-playback and the 640x480 screen.
+rendering on the Mali-G31 GPU, memory on a 1 GB device, video decoding speed and the 640x480
+screen.
 
 ## Legal
 

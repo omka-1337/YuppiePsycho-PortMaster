@@ -18,11 +18,14 @@ if [ -z "$(find "$DATADIR" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null)" ];
   exit 1
 fi
 
-if [ -n "$FRAMEWORK_DIR" ]; then
-  python3 "$GAMEDIR/tools/ypport.py" prepare "$DATADIR" --framework-dir "$FRAMEWORK_DIR"
-else
-  python3 "$GAMEDIR/tools/ypport.py" prepare "$DATADIR"
-fi
+args=()
+[ -n "$FRAMEWORK_DIR" ] && args+=(--framework-dir "$FRAMEWORK_DIR")
+args+=(--native-arch "${YP_NATIVE_ARCH:-aarch64}")
+IFS=: read -r -a native_dirs <<< "${YP_NATIVE_DIRS:-$GAMEDIR/libs.aarch64}"
+for d in "${native_dirs[@]}"; do
+  [ -n "$d" ] && args+=(--native-dir "$d")
+done
+python3 "$GAMEDIR/tools/ypport.py" prepare "$DATADIR" "${args[@]}"
 status=$?
 
 if [ $status -ne 0 ]; then

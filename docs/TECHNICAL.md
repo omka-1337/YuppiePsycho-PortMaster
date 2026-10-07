@@ -9,8 +9,23 @@
   Deck Compatibility").
 - MobyGames and PCGamingWiki list MonoGame, SDL and FMOD for the Executive Edition.
 
-None of this has been checked against the files yet; `ypport.py inspect` is the tool for that.
-The port assumes v2.5+ and refuses anything it cannot recognise rather than guessing.
+`ypport.py inspect` on the current Steam Linux build (1334 files, 1.4 GiB) confirms this and
+fills in the details:
+
+| Finding | Value |
+|--|--|
+| Packaging | self-contained .NET app, loose files (not single-file, not NativeAOT); apphosts `yuppiepsycho`, `game`, `tool-content-bridge`; 14 bundled x86_64 runtime libraries, 168 framework assemblies |
+| Main assembly | `game.dll` 3.1.1.0, `.NETCoreApp,Version=v8.0` - the same major version as PortMaster's runtime |
+| Engine | MonoGame.Framework **3.8.3.1111**, DesktopGL - a custom build: the stock 3.8.3-3.8.5 NuGet packages have no video playback on DesktopGL, this one adds it through Theorafile |
+| Audio | FMOD Core only (`fmod`, 378 entry points; no FMOD Studio), C# wrapper header 2.02.08; NVorbis is present for MonoGame's own Ogg path |
+| Video | `libtheorafile.so` (FNA's Theorafile), loaded by MonoGame's FuncLoader |
+| Steam | Steamworks.NET 20.1.0 (Linux flavour, imports `steam_api` -> `libsteam_api.so`) |
+| Other | NLog 5; `tool-content-bridge` (mod tooling, not needed to play); `Migration`, an x86_64 executable that converts pre-2.5 saves; folders `content`, `res`, `saves` |
+| Shipped x86_64 natives | `libSDL2-2.0.so.0`, `libopenal.so`, `libfmod.so`, `libsteam_api.so`, `libtheorafile.so`, `Migration` |
+
+`game.dll` also carries its own FuncLoader (`libdl.so.2`/`kernel32`/`libSystem.dylib` imports),
+which is why `prepare` installs aarch64 replacements at the original paths instead of relying on
+`LD_LIBRARY_PATH` alone.
 
 ## The pipeline
 
@@ -26,7 +41,9 @@ gamedata/ (as copied from Steam)
    |       or that the device runtime provides)
    |    4. rewrite <game>.runtimeconfig.json: framework-dependent, rollForward=Major
    |    5. rewrite <game>.deps.json: drop the runtime pack and every parked file
-   |    6. write .ypport/launch.env for the launcher
+   |    6. install aarch64 replacements where x86_64 libraries were parked
+   |       (libfmod.so, libopenal.so, libsteam_api.so, libtheorafile.so, ...)
+   |    7. write .ypport/launch.env for the launcher
    v
 gamedata/ runnable with `dotnet <game>.dll` on aarch64
 ```
@@ -34,7 +51,8 @@ gamedata/ runnable with `dotnet <game>.dll` on aarch64
 "Park" means move into `gamedata/.ypport/backup/` preserving the relative path. `restore` puts
 everything back byte-for-byte (tested), `reset` forgets the state without touching files (used
 when the user copies a new game version over a prepared folder), `status` compares a fingerprint
-of the main assembly and of the parked paths, so a re-copied game triggers a fresh setup.
+(size and mtime) of the main assembly and of every file prepare parked, rewrote or installed, so
+a re-copied game triggers a fresh setup.
 
 ### Single-file bundles
 
@@ -64,8 +82,9 @@ table schemas with coded-index sizing). It is used to read:
 
 ### Runtime
 
-PortMaster ships `dotnet-8.0.12.squashfs` (aarch64). A game built for .NET 6 runs on it via
-`rollForward: Major`. Extra `configProperties` set by `prepare`:
+PortMaster ships `dotnet-8.0.12.squashfs` (aarch64). Yuppie Psycho targets .NET 8, so it runs on
+it directly (the framework reference is normalised to `8.0.0`, any 8.0.x patch release satisfies
+it); `rollForward: Major` only matters for .NET 6 builds. Extra `configProperties` set by `prepare`:
 
 | Property | Why |
 |--|--|
@@ -73,9 +92,8 @@ PortMaster ships `dotnet-8.0.12.squashfs` (aarch64). A game built for .NET 6 run
 | `System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization = true` | .NET 8 disables BinaryFormatter by default; harmless if unused, keeps old save code working |
 | `System.GC.Concurrent = false`, `System.GC.Server = false` | no background GC thread, smaller footprint on 1 GB RAM |
 
-If the roll-forward to .NET 8 turns out to break something, an aarch64 .NET 6 runtime unpacked
-into `ports/yuppiepsycho/dotnet/` (with `dotnet`, `host/` and `shared/`) takes precedence over the
-PortMaster runtime without any other change.
+An aarch64 .NET runtime unpacked into `ports/yuppiepsycho/dotnet/` (with `dotnet`, `host/` and
+`shared/`) takes precedence over the PortMaster runtime without any other change.
 
 The launcher also sets `DOTNET_TieredPGO=0`, `DOTNET_TC_QuickJitForLoops=1` and
 `DOTNET_EnableWriteXorExecute=0` to cut JIT overhead on the Cortex-A53.
@@ -85,18 +103,30 @@ The launcher also sets `DOTNET_TieredPGO=0`, `DOTNET_TC_QuickJitForLoops=1` and
 | Library | Source | Notes |
 |--|--|--|
 | SDL2 | the firmware | MonoGame DesktopGL loads `libSDL2-2.0.so.0` by name once the x86_64 copy is parked |
-| OpenAL Soft 1.23.1 | PortMaster-New (SDL2 backend build) | MonoGame's own audio path; the game's music/SFX are expected to go through FMOD |
+| OpenAL Soft 1.23.1 | PortMaster-New (SDL2 backend build) | shipped as `libopenal.so` (MonoGame 3.8.2+) and `libopenal.so.1` (older); MonoGame's own audio path, the game's sound goes through FMOD |
 | FMOD 2.02.18 | PortMaster-New | see below |
+| Theorafile | `src/theorafile`, built from FNA-XNA/Theorafile at a pinned commit | see below |
 | Steam API | `src/steamstub` | see below |
 | gl4es | PortMaster-New | only used on firmwares whose `libgl_<CFW>.txt` asks for it; ROCKNIX has Mesa/Panfrost with desktop GL |
 
-**FMOD.** The FMOD C# wrapper passes its header version to `System_Create`, and the library
-rejects a mismatched header. The expectation (to be confirmed on the device) is that any 2.02.x
-library accepts a 2.02.x header and loads banks built with an equal or older 2.02 FMOD Studio, so
-2.02.18 (the newest aarch64 FMOD in PortMaster; 2.02.06 is also available there) is the default. `inspect`/`log.txt`
-report the version the game was built with; for 2.03 or a mismatch, the user drops the matching
-aarch64 libraries from the official FMOD Engine Linux package into `yuppiepsycho/libs.fmod/`,
-which the launcher puts first on `LD_LIBRARY_PATH`.
+**FMOD.** The FMOD C# wrapper passes its header version to `System_Create`. Disassembling the
+aarch64 2.02.18 library shows the check is `(headerversion >> 8) == 0x202`, i.e. only major and
+minor are compared, so the game's 2.02.08 header is accepted. Yuppie Psycho uses FMOD Core only
+(no Studio banks), which removes the bank-format question. For other versions the user drops
+matching aarch64 libraries from the official FMOD Engine Linux package into
+`yuppiepsycho/libs.fmod/`; the launcher passes that folder to `prepare` first and re-runs the
+setup when its `libfmod.so` differs from the installed one.
+
+**Theorafile.** The game's MonoGame build plays cutscenes with FNA's Theorafile. Its C# binding
+allocates the `OggTheora_File` struct itself, 1472 bytes on 64-bit Unix (Theorafile-CS
+`AllocTheoraFile`), and passes it to the library. x86_64 and aarch64 Linux are both LP64 with the
+same alignment rules, so the layout is identical; `src/theorafile/build.sh` additionally
+`_Static_assert`s that the struct (536 bytes at the pinned commit) fits. The pinned commit has
+the newest API (`tf_videoinfo` with pixel format, multi-track functions); `inspect` reports the
+parameter count of the game's `d_tf_videoinfo` delegate and the API generation of the shipped
+library so a mismatch would show up. The x86_64 build of the same sources is tested in
+`tests/run_tests.sh`: a generated Theora video is decoded through a FuncLoader-style C# binding,
+and valgrind is clean on 4:2:0 and 4:4:4 input.
 
 **Steam.** Valve ships `libsteam_api` only for x86/x86_64. The stub exports all 1092 flat-API
 entry points used by Steamworks.NET 15.0.1 / 20.1.0 / 20.2.0 / 2024.8.0 and Facepunch.Steamworks
@@ -135,10 +165,13 @@ exists on Linux. The Steam Linux build is DesktopGL by definition; use that one.
 
 These need the real game and the device:
 
-- **Packaging of the real build**: single-file or not, .NET 6 or 8, NativeAOT or not -> `inspect`.
-- **Video**: the old Java engine had `novlc`/`noffmpeg` launch options, i.e. VLC/FFmpeg cutscenes. MonoGame DesktopGL has no video
-  playback, so the current engine brings its own; `inspect` lists the library it imports. An
-  x86_64 video library would need an aarch64 replacement (FFmpeg/libVLC are usually available).
+- **Theorafile API of the real build**: the next `inspect` run reports `d_tf_videoinfo`'s
+  parameter count and the shipped library's API generation; the aarch64 build may need to be
+  pinned to an older commit if they are older than the current API.
+- **Video performance**: Theora decoding on the Cortex-A53 uses the NEON code paths of
+  libtheora; cutscene resolution decides whether it keeps up.
+- **SDL2 version**: the game's MonoGame was built against SDL 2.32; the firmware's SDL2 must
+  export every function MonoGame binds at startup.
 - **Graphics**: MonoGame DesktopGL needs desktop OpenGL. ROCKNIX on the H700 uses Mesa's Panfrost
   driver for the Mali-G31, which provides desktop GL; gl4es is the fallback on GLES-only firmwares.
 - **Memory**: .NET 8 + the game on 1 GB RAM. ROCKNIX supports swap/zram if needed.
@@ -146,12 +179,14 @@ These need the real game and the device:
   size the game requests may need a settings tweak.
 - **Startup time**: everything is JIT-compiled on first run. Precompiling the game assemblies to
   ReadyToRun for linux-arm64 on a PC (crossgen2) is the obvious optimisation once it runs.
-- **Saves**: v2.5 creates its save folder inside the game folder, so saves live in
-  `gamedata/`; XDG paths are redirected to `yuppiepsycho/savedata` as a catch-all.
+- **Saves**: the game keeps them in `saves/` inside the game folder, so saves copied from a PC
+  come along in `gamedata/saves`; XDG paths are redirected to `yuppiepsycho/savedata` as a
+  catch-all. Pre-2.5 saves need the x86_64 `Migration` tool, so convert them on the PC first.
 
 ## Roadmap
 
-1. Run `inspect` on the real Steam Linux and Windows builds; adjust detection if needed.
+1. ~~Run `inspect` on the real Steam Linux build~~ (done: .NET 8 self-contained, MonoGame 3.8.3
+   DesktopGL + Theorafile, FMOD Core 2.02, Steamworks.NET 20.1).
 2. First boot on ROCKNIX / RG40XX H: logs, Steam behaviour (`YP_STEAM_STUB_TRACE=1`), FMOD banks.
 3. Video playback, resolution/scaling, controls.
 4. Performance: ReadyToRun precompilation, GC settings, swap.

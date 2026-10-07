@@ -60,6 +60,26 @@ cleanup() {
   [ -n "$DOTNET_MOUNT" ] && $ESUDO umount "$DOTNET_MOUNT" 2>/dev/null
 }
 
+# --- aarch64 libraries replacing the game's x86_64 ones ----------------------
+LIBDIR="$GAMEDIR/libs.$port_arch"
+FMOD_LIBDIR="${YP_FMOD_DIR:-}"
+if [ -z "$FMOD_LIBDIR" ] && [ -f "$GAMEDIR/libs.fmod/libfmod.so" ]; then
+  FMOD_LIBDIR="$GAMEDIR/libs.fmod"   # FMOD libraries supplied by the user
+fi
+# The setup installs these next to the game in place of the parked x86_64
+# files; the first folder that has a library wins.
+export YP_NATIVE_DIRS="${FMOD_LIBDIR:+$FMOD_LIBDIR:}$LIBDIR"
+export YP_NATIVE_ARCH="$port_arch"
+
+# A user-supplied FMOD that differs from the copy installed in the game folder
+# means the setup has to run again.
+if [ -n "$FMOD_LIBDIR" ] && [ -f "$DATADIR/.ypport/launch.env" ]; then
+  appdir="$DATADIR/$(. "$DATADIR/.ypport/launch.env"; echo "$YP_APPDIR")"
+  if [ -f "$appdir/libfmod.so" ] && ! cmp -s "$FMOD_LIBDIR/libfmod.so" "$appdir/libfmod.so"; then
+    python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"
+  fi
+fi
+
 # --- first launch: make the copied game runnable on aarch64 -----------------
 if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" > /dev/null 2>&1; then
   if ! command -v python3 > /dev/null 2>&1; then
@@ -88,11 +108,6 @@ fi
 source "$DATADIR/.ypport/launch.env"
 
 # --- native libraries ---------------------------------------------------------
-LIBDIR="$GAMEDIR/libs.$port_arch"
-FMOD_LIBDIR="${YP_FMOD_DIR:-}"
-if [ -z "$FMOD_LIBDIR" ] && [ -f "$GAMEDIR/libs.fmod/libfmod.so" ]; then
-  FMOD_LIBDIR="$GAMEDIR/libs.fmod"   # FMOD libraries supplied by the user
-fi
 case "${YP_FMOD_VERSION:-}" in
   ""|2.02.*) ;;
   *) [ -z "$FMOD_LIBDIR" ] && echo "WARNING: the game was built against FMOD $YP_FMOD_VERSION; the bundled" \

@@ -8,8 +8,9 @@ projects. Audio by FMOD Studio by Firelight Technologies Pty Ltd.
 **Experimental.** This is a native port: the game's own .NET code runs on an aarch64 .NET
 runtime. No x86 emulation is involved.
 
-Yuppie Psycho v2.5 and newer runs on MonoGame (.NET). Older versions (the original Java
-engine) are not supported.
+Yuppie Psycho v2.5 and newer runs on MonoGame (.NET 8). Older versions (the original Java
+engine) are not supported. Saves from a PC can be copied along (`gamedata/saves`); saves from
+before v2.5 must be converted by running the game once on the PC.
 
 ## Installation
 
@@ -19,7 +20,7 @@ engine) are not supported.
      SteamCMD: `steamcmd +@sSteamCmdForcePlatformType linux +login <user> +app_update 597760 validate +quit`
 2. Copy the **complete contents** of the game folder into `ports/yuppiepsycho/gamedata/`.
 3. Start *Yuppie Psycho* from the Ports menu. The first launch prepares the files for ARM
-   (extracts the .NET single-file bundle, sets aside the x86_64 runtime and libraries). This
+   (sets aside the x86_64 .NET runtime and libraries and puts aarch64 ones in their place). This
    takes a minute or two and only happens again when the game files change.
 
 The original files that the setup sets aside are kept in `gamedata/.ypport/backup`; nothing is
@@ -36,16 +37,16 @@ YP_STEAM_STUB=fake
 YP_ARGS=""
 ```
 
-If the game uses a different FMOD version than the bundled 2.02.18 and has no sound, download
-the *FMOD Engine* for Linux from fmod.com (same version as reported in `log.txt`), and copy
-`api/core/lib/arm64/libfmod.so*` and `api/studio/lib/arm64/libfmodstudio.so*` into
-`ports/yuppiepsycho/libs.fmod/`. Keep the versioned names (e.g. `libfmod.so.13`) and add copies
-named `libfmod.so` and `libfmodstudio.so` (SD cards often cannot hold symlinks).
+The bundled aarch64 FMOD is 2.02.18, which accepts the game's 2.02 headers. If a future game
+update moves to another FMOD version and there is no sound, download the *FMOD Engine* for Linux
+from fmod.com (same version as reported in `log.txt`) and copy `api/core/lib/arm64/libfmod.so`
+into `ports/yuppiepsycho/libs.fmod/` (a real file, not a symlink - SD cards often cannot hold
+symlinks); the next launch re-runs the setup with it.
 
 ## Controls
 
 The game supports gamepads natively through SDL2; the handheld's controls are used as a
-standard gamepad. Buttons can be changed in the game's options.
+standard gamepad.
 
 | Button | Action |
 |--|--|
