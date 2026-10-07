@@ -1,0 +1,38 @@
+#!/bin/bash
+# First-launch setup for Yuppie Psycho, run by PortMaster's patcher UI
+# (or directly by YuppiePsycho.sh on older PortMaster versions).
+#
+# Expects GAMEDIR, DATADIR and FRAMEWORK_DIR from the launcher.
+
+GAMEDIR="${GAMEDIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+DATADIR="${DATADIR:-$GAMEDIR/gamedata}"
+LOGFILE="$GAMEDIR/patchlog.txt"
+exec > >(tee "$LOGFILE") 2>&1
+
+echo "Yuppie Psycho first-time setup"
+echo "------------------------------"
+
+if [ -z "$(find "$DATADIR" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null)" ]; then
+  echo "No game files found in yuppiepsycho/gamedata."
+  echo "Copy the complete game folder (Steam: Linux or Windows build) there."
+  exit 1
+fi
+
+if [ -n "$FRAMEWORK_DIR" ]; then
+  python3 "$GAMEDIR/tools/ypport.py" prepare "$DATADIR" --framework-dir "$FRAMEWORK_DIR"
+else
+  python3 "$GAMEDIR/tools/ypport.py" prepare "$DATADIR"
+fi
+status=$?
+
+if [ $status -ne 0 ]; then
+  echo
+  echo "Setup failed (exit $status). A full report of the game files follows."
+  python3 "$GAMEDIR/tools/ypport.py" inspect "$DATADIR" > "$GAMEDIR/inspect.txt" 2>&1
+  cat "$GAMEDIR/inspect.txt"
+  echo "Report saved to yuppiepsycho/inspect.txt"
+  exit 1
+fi
+
+echo "Setup complete."
+exit 0

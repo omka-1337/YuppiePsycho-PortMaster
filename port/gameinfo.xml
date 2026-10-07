@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./YuppiePsycho.sh</path>
+    <name>Yuppie Psycho: Executive Edition</name>
+    <desc>Brian Pasternack is a young man with no future in a dystopian 90s society. His life is about to change on his first day at Sintracorp, one of the largest companies in the world. It's a strange, unsettling place, and Brian is hired for an unexpected task: to hunt the witch that haunts the building.</desc>
+    <releasedate>20190425T000000</releasedate>
+    <developer>Baroque Decay</developer>
+    <publisher>Neon Doctrine, Raw Fury</publisher>
+    <genre>Horror</genre>
+  </game>
+</gameList>

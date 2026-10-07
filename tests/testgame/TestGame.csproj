@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Stand-in for Yuppie Psycho used by tests/run_tests.sh: a MonoGame DesktopGL
+    game with an FMOD C# wrapper and Steamworks.NET, i.e. the same kinds of
+    dependencies the real game has. It is published in several packaging
+    variants and then pushed through ypport.py.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net6.0</TargetFramework>
+    <AssemblyName>TestGame</AssemblyName>
+    <RootNamespace>TestGame</RootNamespace>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MonoGame.Framework.DesktopGL" Version="3.8.1.303" />
+    <PackageReference Include="Steamworks.NET" Version="20.2.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Content/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

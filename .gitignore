@@ -1,0 +1,6 @@
+build/
+dist/
+__pycache__/
+*.pyc
+tests/testgame/bin/
+tests/testgame/obj/

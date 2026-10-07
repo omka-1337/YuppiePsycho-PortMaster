@@ -1,0 +1,42 @@
+{
+  "version": 4,
+  "name": "yuppiepsycho.zip",
+  "items": [
+    "YuppiePsycho.sh",
+    "yuppiepsycho"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "Yuppie Psycho: Executive Edition",
+    "porter": [
+      "omka-1337"
+    ],
+    "desc": "Brian Pasternack is a young man with no future in a dystopian 90s society. His life is about to change on his first day at Sintracorp, one of the largest companies in the world. It's a strange, unsettling place, and Brian is hired for an unexpected task: to hunt the witch that haunts the building.",
+    "desc_md": null,
+    "inst": "Requires Yuppie Psycho v2.5 or newer (the MonoGame engine). Copy the complete game folder from Steam (Linux build preferred, Windows build also works) into yuppiepsycho/gamedata. The first launch converts the files for ARM, which takes a minute or two.",
+    "inst_md": "- Requires **Yuppie Psycho v2.5 or newer** (the MonoGame engine).\n- Copy the **complete** game folder from Steam (Linux build preferred, Windows build also works) into `yuppiepsycho/gamedata`.\n- The first launch converts the files for ARM, which takes a minute or two.",
+    "genres": [
+      "adventure",
+      "horror"
+    ],
+    "image": null,
+    "rtr": false,
+    "exp": true,
+    "runtime": [
+      "dotnet-8.0.12.squashfs"
+    ],
+    "store": [
+      {
+        "name": "Steam",
+        "gameurl": "https://store.steampowered.com/app/597760/Yuppie_Psycho_Executive_Edition/",
+        "developerurl": "https://baroquedecay.com/"
+      }
+    ],
+    "availability": "paid",
+    "reqs": [],
+    "arch": [
+      "aarch64"
+    ],
+    "min_glibc": ""
+  }
+}
