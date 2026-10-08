@@ -158,3 +158,27 @@ namespace Theorafile
         }
     }
 }
+
+namespace Theorafile
+{
+    // Function-pointer style binding (delegate* unmanaged), the other common
+    // way to bind a dlopen()ed library from modern C#.
+    public static unsafe class TFPointers
+    {
+        private static delegate* unmanaged[Cdecl]<IntPtr, int*, int*, double*, int*, void> tf_videoinfo_ptr;
+
+        public static void Bind(IntPtr lib)
+        {
+            tf_videoinfo_ptr = (delegate* unmanaged[Cdecl]<IntPtr, int*, int*, double*, int*, void>)
+                NativeLibrary.GetExport(lib, "tf_videoinfo");
+        }
+
+        public static void VideoInfo(IntPtr file, out int width, out int height, out double fps, out int fmt)
+        {
+            int w, h, f;
+            double r;
+            tf_videoinfo_ptr(file, &w, &h, &r, &f);
+            width = w; height = h; fps = r; fmt = f;
+        }
+    }
+}

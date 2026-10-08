@@ -35,15 +35,17 @@ port_arch="${DEVICE_ARCH:-aarch64}"
 [ -f "$GAMEDIR/settings.txt" ] && source "$GAMEDIR/settings.txt"
 
 # --- .NET runtime -----------------------------------------------------------
-# A runtime unpacked into yuppiepsycho/dotnet wins (e.g. an exact .NET 6
-# build); otherwise PortMaster's dotnet runtime squashfs is mounted.
+# The port normally carries its own aarch64 runtime in yuppiepsycho/dotnet.
+# Packages built with `build.sh --no-dotnet` use PortMaster's runtime instead.
 DOTNET_MOUNT=""
-if [ -x "$GAMEDIR/dotnet/dotnet" ]; then
+if [ -f "$GAMEDIR/dotnet/dotnet" ]; then
+  # Unzipping on some systems drops the executable bit.
+  [ -x "$GAMEDIR/dotnet/dotnet" ] || $ESUDO chmod +x "$GAMEDIR/dotnet/dotnet" "$GAMEDIR"/dotnet/shared/*/*/createdump 2>/dev/null
   export DOTNET_ROOT="$GAMEDIR/dotnet"
 else
   dotnetfile="$controlfolder/libs/dotnet-8.0.12.squashfs"
   if [ ! -f "$dotnetfile" ]; then
-    pm_message "Missing runtime dotnet-8.0.12. Install it from PortMaster (Runtimes) and try again."
+    pm_message "No .NET runtime: yuppiepsycho/dotnet is missing and the PortMaster runtime dotnet-8.0.12 is not installed."
     sleep 5
     exit 1
   fi

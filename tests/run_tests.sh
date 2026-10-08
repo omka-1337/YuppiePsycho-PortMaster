@@ -77,7 +77,10 @@ assert r["engine"]["name"] == "MonoGame.Framework" and r["engine"]["flavor"] == 
 assert r["fmod_header_version"] == "2.02.18", r["fmod_header_version"]
 for key in ("fmod", "steam_api", "sdl2", "openal", "theora"):
     assert key in r["native_needs"], key
-assert r["theorafile"]["videoinfo_params"] == 5, r["theorafile"]
+t = r["theorafile"]
+assert t["videoinfo_params"] == 5, t
+assert t["binding"].get("delegate d_tf_videoinfo") == 5, t["binding"]
+assert t["binding"].get("function-pointer field tf_videoinfo_ptr") == 5, t["binding"]
 EOF
 
   python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" "${NATIVE_ARGS[@]}" > "$WORK/run/$name.prepare.log" 2>&1 \
@@ -182,6 +185,46 @@ if [ ${#NATIVE_ARGS[@]} -gt 0 ]; then
   touch -d '2001-01-01' "$dir/libtheorafile.so"
   python3 "$YPPORT" status "$dir" && bad "status ignores changed replacement" \
     || ok "status notices a changed replacement library"
+fi
+
+# Users may copy the game folder itself instead of its contents:
+# gamedata/YuppiePsycho/game.dll must work as well as gamedata/game.dll.
+echo "== game folder copied as a whole"
+dir="$WORK/run/nested"; rm -rf "$dir"; mkdir -p "$dir"; cp -a "$WORK/out/sc-net8" "$dir/YuppiePsycho"
+if python3 "$YPPORT" prepare "$dir" --framework-dir "$FWDIR" "${NATIVE_ARGS[@]}" > "$WORK/run/nested.prepare.log" 2>&1; then
+  ( . "$dir/.ypport/launch.env"; [ "$YP_APPDIR" = YuppiePsycho ] || exit 1
+    cd "$dir/$YP_APPDIR" && LD_LIBRARY_PATH="$NATIVES" "$DOTNET" "$(basename "$YP_ENTRY")" --smoke ) \
+    > "$WORK/run/nested.smoke.log" 2>&1
+  grep -q "SMOKE OK" "$WORK/run/nested.smoke.log" && ok "nested game folder prepares and runs" \
+    || bad "nested game folder run"
+else
+  bad "nested game folder prepare (see $WORK/run/nested.prepare.log)"
+fi
+
+# The runtime the package bundles is assembled from NuGet packages. Do the same
+# for linux-x64 and run the stand-in game on it.
+echo "== runtime assembled from NuGet"
+RT_VERSION=8.0.31
+rt_ok=1
+packs=()
+for pack in "microsoft.netcore.app.runtime.linux-x64 27a891335f180d6732c5a53b4847790753b6efaa1bc7c3f814013aa968d6aa36" \
+            "runtime.linux-x64.microsoft.netcore.dotnethost fa6a20c74bb0bbd21386a81034a0682ca5671fe2dce9818b4402c9aa0a287d14"; do
+  read -r id sum <<< "$pack"
+  f="$WORK/$id.$RT_VERSION.nupkg"
+  [ -f "$f" ] || curl -fsSL --retry 4 -o "$f" "https://api.nuget.org/v3-flatcontainer/$id/$RT_VERSION/$id.$RT_VERSION.nupkg" || rt_ok=0
+  echo "$sum  $f" | sha256sum -c --quiet - || rt_ok=0
+  packs+=("$f")
+done
+if [ $rt_ok = 1 ] && python3 "$REPO/src/dotnet/assemble_runtime.py" "${packs[@]}" "$WORK/dotnet-x64" > /dev/null; then
+  dir="$WORK/run/nuget-runtime"; rm -rf "$dir"; cp -a "$WORK/out/sc-net8" "$dir"
+  python3 "$YPPORT" prepare "$dir" --framework-dir "$WORK/dotnet-x64/shared/Microsoft.NETCore.App/$RT_VERSION" \
+    > /dev/null 2>&1
+  (cd "$dir" && env -u DOTNET_ROOT DOTNET_ROOT="$WORK/dotnet-x64" "$WORK/dotnet-x64/dotnet" TestGame.dll --smoke) \
+    > "$WORK/run/nuget-runtime.log" 2>&1
+  grep -q "runtime: .NET $RT_VERSION" "$WORK/run/nuget-runtime.log" && grep -q "SMOKE OK" "$WORK/run/nuget-runtime.log" \
+    && ok "game runs on the NuGet-assembled .NET $RT_VERSION" || bad "NuGet-assembled runtime run"
+else
+  bad "assembling the runtime from NuGet"
 fi
 
 # NativeAOT builds carry no IL; they must be recognised and refused.

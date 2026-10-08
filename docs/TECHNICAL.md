@@ -82,9 +82,17 @@ table schemas with coded-index sizing). It is used to read:
 
 ### Runtime
 
-PortMaster ships `dotnet-8.0.12.squashfs` (aarch64). Yuppie Psycho targets .NET 8, so it runs on
-it directly (the framework reference is normalised to `8.0.0`, any 8.0.x patch release satisfies
-it); `rollForward: Major` only matters for .NET 6 builds. Extra `configProperties` set by `prepare`:
+The package carries its own runtime in `yuppiepsycho/dotnet`: .NET 8.0.31 for linux-arm64,
+laid out by `src/dotnet/assemble_runtime.py` from two immutable, Microsoft-signed NuGet packages
+(`Microsoft.NETCore.App.Runtime.linux-arm64` for the shared framework and hostfxr,
+`runtime.linux-arm64.Microsoft.NETCore.DotNetHost` for the `dotnet` muxer) into the standard
+`DOTNET_ROOT` structure. It needs glibc 2.17. The same procedure for linux-x64 is exercised by
+the tests, which run the stand-in game on the result. Built with `--no-dotnet`, the package
+falls back to PortMaster's `dotnet-8.0.12.squashfs`.
+
+Yuppie Psycho targets .NET 8, so it runs on either directly (the framework reference is
+normalised to `8.0.0`, any 8.0.x patch release satisfies it); `rollForward: Major` only matters
+for .NET 6 builds. Extra `configProperties` set by `prepare`:
 
 | Property | Why |
 |--|--|
@@ -92,8 +100,8 @@ it); `rollForward: Major` only matters for .NET 6 builds. Extra `configPropertie
 | `System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization = true` | .NET 8 disables BinaryFormatter by default; harmless if unused, keeps old save code working |
 | `System.GC.Concurrent = false`, `System.GC.Server = false` | no background GC thread, smaller footprint on 1 GB RAM |
 
-An aarch64 .NET runtime unpacked into `ports/yuppiepsycho/dotnet/` (with `dotnet`, `host/` and
-`shared/`) takes precedence over the PortMaster runtime without any other change.
+Any aarch64 .NET runtime unpacked into `ports/yuppiepsycho/dotnet/` (with `dotnet`, `host/` and
+`shared/`, e.g. Microsoft's `dotnet-runtime-8.0.x-linux-arm64.tar.gz`) is used the same way.
 
 The launcher also sets `DOTNET_TieredPGO=0`, `DOTNET_TC_QuickJitForLoops=1` and
 `DOTNET_EnableWriteXorExecute=0` to cut JIT overhead on the Cortex-A53.
@@ -104,7 +112,7 @@ The launcher also sets `DOTNET_TieredPGO=0`, `DOTNET_TC_QuickJitForLoops=1` and
 |--|--|--|
 | SDL2 | the firmware | MonoGame DesktopGL loads `libSDL2-2.0.so.0` by name once the x86_64 copy is parked |
 | OpenAL Soft 1.23.1 | PortMaster-New (SDL2 backend build) | shipped as `libopenal.so` (MonoGame 3.8.2+) and `libopenal.so.1` (older); MonoGame's own audio path, the game's sound goes through FMOD |
-| FMOD 2.02.18 | PortMaster-New | see below |
+| FMOD 2.02.18 (core) | PortMaster-New | see below |
 | Theorafile | `src/theorafile`, built from FNA-XNA/Theorafile at a pinned commit | see below |
 | Steam API | `src/steamstub` | see below |
 | gl4es | PortMaster-New | only used on firmwares whose `libgl_<CFW>.txt` asks for it; ROCKNIX has Mesa/Panfrost with desktop GL |
@@ -122,11 +130,14 @@ allocates the `OggTheora_File` struct itself, 1472 bytes on 64-bit Unix (Theoraf
 `AllocTheoraFile`), and passes it to the library. x86_64 and aarch64 Linux are both LP64 with the
 same alignment rules, so the layout is identical; `src/theorafile/build.sh` additionally
 `_Static_assert`s that the struct (536 bytes at the pinned commit) fits. The pinned commit has
-the newest API (`tf_videoinfo` with pixel format, multi-track functions); `inspect` reports the
-parameter count of the game's `d_tf_videoinfo` delegate and the API generation of the shipped
-library so a mismatch would show up. The x86_64 build of the same sources is tested in
-`tests/run_tests.sh`: a generated Theora video is decoded through a FuncLoader-style C# binding,
-and valgrind is clean on 4:2:0 and 4:4:4 input.
+the newest API (`tf_videoinfo` with pixel format, multi-track functions). The library the game
+ships exports `tf_setvideotrack`, i.e. it is of the same (2021-12+) API generation, and the
+game's binding was written against it, so the two match. `inspect` also looks for the binding in
+the metadata (delegate types, delegate or `delegate* unmanaged` fields, wrapper methods named
+after the function) and prints the parameter count of `tf_videoinfo` it finds; the game's custom
+MonoGame build hides it from the first version of that heuristic. The x86_64 build of the same
+sources is tested in `tests/run_tests.sh`: a generated Theora video is decoded through a
+FuncLoader-style C# binding, and valgrind is clean on 4:2:0 and 4:4:4 input.
 
 **Steam.** Valve ships `libsteam_api` only for x86/x86_64. The stub exports all 1092 flat-API
 entry points used by Steamworks.NET 15.0.1 / 20.1.0 / 20.2.0 / 2024.8.0 and Facepunch.Steamworks
@@ -165,9 +176,6 @@ exists on Linux. The Steam Linux build is DesktopGL by definition; use that one.
 
 These need the real game and the device:
 
-- **Theorafile API of the real build**: the next `inspect` run reports `d_tf_videoinfo`'s
-  parameter count and the shipped library's API generation; the aarch64 build may need to be
-  pinned to an older commit if they are older than the current API.
 - **Video performance**: Theora decoding on the Cortex-A53 uses the NEON code paths of
   libtheora; cutscene resolution decides whether it keeps up.
 - **SDL2 version**: the game's MonoGame was built against SDL 2.32; the firmware's SDL2 must

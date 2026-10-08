@@ -614,26 +614,67 @@ class Assembly(object):
             out.setdefault(mods[scope - 1], set()).add(entry)
         return dict((k, sorted(v)) for k, v in out.items())
 
-    def delegate_param_counts(self, prefix):
-        """{delegate type name: parameter count of Invoke} for delegate types
-        whose name starts with prefix (MonoGame FuncLoader style bindings)."""
+    def _invoke_param_count(self, td_index):
+        """Parameter count of the Invoke method of TypeDef #td_index (1-based)."""
         typedefs = self.table(0x02)
         methods = self.table(0x06)
-        out = {}
+        td = typedefs[td_index - 1]
+        last = typedefs[td_index][5] if td_index < len(typedefs) else len(methods) + 1
+        for midx in range(td[5], last):
+            if self.string(methods[midx - 1][3]) == "Invoke":
+                return _method_sig_param_count(self.blob(methods[midx - 1][4]))
+        return None
+
+    def native_binding_arity(self, func_name):
+        """Best-effort parameter counts of a native function bound by name.
+
+        Covers the usual binding styles: delegate types (FuncLoader:
+        `d_tf_videoinfo`), fields holding a delegate or an unmanaged function
+        pointer, and wrapper methods named after the function. Returns
+        {"<kind> <member>": count}."""
+        key = func_name.lower()
+        typedefs = self.table(0x02)
+        found = {}
         for i, td in enumerate(typedefs):
             name = self.string(td[1])
-            if not name.startswith(prefix):
+            if key in name.lower():
+                n = self._invoke_param_count(i + 1)
+                if n is not None:
+                    found["delegate " + name] = n
+        for flags, fname_idx, sig_idx in self.table(0x04):
+            fname = self.string(fname_idx)
+            if key not in fname.lower():
                 continue
-            first = td[5]
-            last = typedefs[i + 1][5] if i + 1 < len(typedefs) else len(methods) + 1
-            for midx in range(first, last):
-                if self.string(methods[midx - 1][3]) != "Invoke":
-                    continue
-                sig = self.blob(methods[midx - 1][4])
-                if len(sig) >= 2:
-                    count, _ = _compressed_uint(sig, 1)
-                    out[name] = count
-        return out
+            sig = self.blob(sig_idx)
+            n, kind = self._field_callable_arity(sig)
+            if n is not None:
+                found["%s field %s" % (kind, fname)] = n
+        for _rva, _impl, _flags, mname_idx, sig_idx, _params in self.table(0x06):
+            mname = self.string(mname_idx)
+            if mname != "Invoke" and key in mname.lower():
+                n = _method_sig_param_count(self.blob(sig_idx))
+                if n is not None:
+                    found["method " + mname] = n
+        return found
+
+    def _field_callable_arity(self, sig):
+        """For a field signature holding a function pointer or a delegate
+        defined in this assembly: (parameter count, kind)."""
+        if not sig or sig[0] != 0x06:
+            return None, None
+        p = 1
+        while p < len(sig) and sig[p] in (0x1F, 0x20):  # custom modifiers
+            _, hdr = _compressed_uint(sig, p + 1)
+            p += 1 + hdr
+        if p >= len(sig):
+            return None, None
+        if sig[p] == 0x1B:  # FNPTR
+            return _method_sig_param_count(sig[p + 1:]), "function-pointer"
+        if sig[p] == 0x12:  # CLASS
+            coded, _ = _compressed_uint(sig, p + 1)
+            if coded & 3 == 0:  # TypeDef
+                return self._invoke_param_count(coded >> 2), "delegate"
+        return None, None
 
     def type_defs(self):
         return [(self.string(r[2]), self.string(r[1])) for r in self.table(0x02)]
@@ -705,6 +746,18 @@ def _compressed_uint(data, p):
     if b0 & 0xC0 == 0x80:
         return ((b0 & 0x3F) << 8) | data[p + 1], 2
     return (((b0 & 0x1F) << 24) | (data[p + 1] << 16) | (data[p + 2] << 8) | data[p + 3]), 4
+
+
+def _method_sig_param_count(sig):
+    """Parameter count from a MethodDefSig/MethodRefSig/StandAloneMethodSig."""
+    if len(sig) < 2:
+        return None
+    p = 1
+    if sig[0] & 0x10:  # GENERIC: skip the generic parameter count
+        _, hdr = _compressed_uint(sig, p)
+        p += hdr
+    count, _ = _compressed_uint(sig, p)
+    return count
 
 
 def load_assembly(data, name):
@@ -1015,7 +1068,7 @@ def inspect_dir(root, skip=()):
                     entry["steamworks_wrapper"] = "Steamworks.NET"
                 elif ("Steamworks", "SteamClient") in types:
                     entry["steamworks_wrapper"] = "Facepunch.Steamworks"
-                tf = asm.delegate_param_counts("d_tf_")
+                tf = asm.native_binding_arity("tf_videoinfo")
                 if tf:
                     entry["theorafile_binding"] = tf
             except (struct.error, ValueError, IndexError, KeyError) as e:
@@ -1112,7 +1165,8 @@ def _summarise(report):
         binding.update(m.get("theorafile_binding", {}))
     libs = [n for n in report["native_libs"] if n.get("theorafile_api")]
     if binding or libs:
-        vi = binding.get("d_tf_videoinfo")
+        counts = sorted(set(binding.values()))
+        vi = counts[-1] if counts else None
         report["theorafile"] = {
             "binding": binding,
             "videoinfo_params": vi,
@@ -1226,10 +1280,14 @@ def print_report(r, out=sys.stdout):
         w("  FMOD C# wrapper header version: %s\n" % r["fmod_header_version"])
     if r.get("theorafile"):
         t = r["theorafile"]
-        w("  Theorafile (video): binding tf_videoinfo %s params -> %s; shipped library: %s\n" % (
-            t["videoinfo_params"], t["videoinfo_api"], t["shipped_library_api"]))
-        if t["binding"]:
-            w("    bound functions: %s\n" % ", ".join(sorted(n[2:] for n in t["binding"])))
+        if t["videoinfo_params"] is not None:
+            binding = "tf_videoinfo takes %d params -> %s" % (t["videoinfo_params"], t["videoinfo_api"])
+        else:
+            binding = "not identified in metadata"
+        w("  Theorafile (video): binding %s; shipped library API: %s\n" % (
+            binding, t["shipped_library_api"] or "-"))
+        for where, n in sorted(t["binding"].items()):
+            w("    %s: %d params\n" % (where, n))
     app = [m for m in r["managed"] if not m["framework_assembly"]]
     fw = [m for m in r["managed"] if m["framework_assembly"]]
     w("  app assemblies (%d):\n" % len(app))

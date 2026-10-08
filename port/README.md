@@ -6,7 +6,8 @@ Thanks to [Baroque Decay](https://baroquedecay.com/) for creating Yuppie Psycho,
 projects. Audio by FMOD Studio by Firelight Technologies Pty Ltd.
 
 **Experimental.** This is a native port: the game's own .NET code runs on an aarch64 .NET
-runtime. No x86 emulation is involved.
+runtime. No x86 emulation is involved. The .NET 8 runtime is included in the port
+(`yuppiepsycho/dotnet`); nothing else has to be installed.
 
 Yuppie Psycho v2.5 and newer runs on MonoGame (.NET 8). Older versions (the original Java
 engine) are not supported. Saves from a PC can be copied along (`gamedata/saves`); saves from
@@ -18,7 +19,9 @@ before v2.5 must be converted by running the game once on the PC.
    as long as it is a MonoGame DesktopGL build (the setup checks this).
    - The Linux build can be taken from a Linux PC or a Steam Deck, or downloaded on any PC with
      SteamCMD: `steamcmd +@sSteamCmdForcePlatformType linux +login <user> +app_update 597760 validate +quit`
-2. Copy the **complete contents** of the game folder into `ports/yuppiepsycho/gamedata/`.
+2. Copy the **contents** of the game's install folder (the folder with `game.dll`, `content/`,
+   `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/`, so that the file
+   `ports/yuppiepsycho/gamedata/game.dll` exists.
 3. Start *Yuppie Psycho* from the Ports menu. The first launch prepares the files for ARM
    (sets aside the x86_64 .NET runtime and libraries and puts aarch64 ones in their place). This
    takes a minute or two and only happens again when the game files change.
