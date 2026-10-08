@@ -41,9 +41,10 @@ gamedata/ (as copied from Steam)
    |       or that the device runtime provides)
    |    4. rewrite <game>.runtimeconfig.json: framework-dependent, rollForward=Major
    |    5. rewrite <game>.deps.json: drop the runtime pack and every parked file
-   |    6. install aarch64 replacements where x86_64 libraries were parked
+   |    6. retarget CPU-stamped IL assemblies (Machine field, ReadyToRun) to aarch64
+   |    7. install aarch64 replacements where x86_64 libraries were parked
    |       (libfmod.so, libopenal.so, libsteam_api.so, libtheorafile.so, ...)
-   |    7. write .ypport/launch.env for the launcher
+   |    8. write .ypport/launch.env for the launcher
    v
 gamedata/ runnable with `dotnet <game>.dll` on aarch64
 ```
@@ -53,6 +54,31 @@ everything back byte-for-byte (tested), `reset` forgets the state without touchi
 when the user copies a new game version over a prepared folder), `status` compares a fingerprint
 (size and mtime) of the main assembly and of every file prepare parked, rewrote or installed, so
 a re-copied game triggers a fresh setup.
+
+### CPU-stamped IL assemblies
+
+The first boot on the RG40XX H got through the setup and then failed with
+`System.IO.FileLoadException: Could not load file or assembly 'game, Version=3.1.1.0'`.
+`dotnet publish -r linux-x64` compiles the game's own assemblies with `PlatformTarget=x64`:
+the code is still IL, but the PE header says `Machine=AMD64` (PE32+), and CoreCLR on aarch64
+refuses to load an assembly stamped for another CPU. Steamworks.NET's linux-x64 flavour is
+stamped the same way. The failure reproduces on x86_64 with the roles swapped (an assembly
+stamped ARM64 gives exactly that exception).
+
+`prepare` therefore rewrites the 2-byte Machine field of such assemblies to the device's CPU,
+which makes them identical to what `PlatformTarget=arm64` would have produced. ReadyToRun images
+contain precompiled code and native PE structures for their CPU; for those the native data
+directories (export, import, exception, relocations, ...), the entry point and the ReadyToRun
+header are cleared and the ILONLY flag set, turning them back into plain IL images whose section
+layout, and therefore every metadata RVA, is unchanged; the runtime then JIT-compiles the IL.
+PE32 x86-only assemblies (`32BITREQUIRED`) get that flag cleared. Original files go to the
+backup like everything else.
+
+The tests cover this mirrored: builds published for linux-arm64 (with and without ReadyToRun)
+are prepared for x86_64 and run, including video decoding and the Steam stub.
+
+A tool version is recorded in the state; `status` exits with 2 for a folder prepared by another
+version, and the launcher then restores the original files and runs the setup again.
 
 ### Single-file bundles
 

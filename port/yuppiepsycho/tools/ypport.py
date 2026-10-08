@@ -38,7 +38,7 @@ try:
 except ImportError:  # pragma: no cover
     from pipes import quote as shquote
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 STATE_DIR = ".ypport"
 
 # --------------------------------------------------------------------------
@@ -439,11 +439,19 @@ class Assembly(object):
         cli = self._off(cli_rva)
         (_, self.rt_major, self.rt_minor, md_rva, _md_size, self.cli_flags,
          _ep) = struct.unpack_from("<IHHIIII", data, cli)
+        self.lfanew = lfanew
+        self.opt_offset = opt
+        self.dirs_offset = dd
+        self.pe32_plus = magic == 0x20B
+        self.cli_offset = cli
         mnh_rva = struct.unpack_from("<I", data, cli + 64)[0]
         self.ready_to_run = False
+        self.r2r_flags = 0
         if mnh_rva:
             off = self._off(mnh_rva)
             self.ready_to_run = off is not None and data[off:off + 4] == b"RTR\0"
+            if self.ready_to_run:
+                self.r2r_flags = struct.unpack_from("<I", data, off + 8)[0]
         self._parse_metadata(self._off(md_rva))
 
     # -- PE helpers --------------------------------------------------------
@@ -760,6 +768,59 @@ def _method_sig_param_count(sig):
     return count
 
 
+ARCH_MACHINES = {"x86_64": 0x8664, "aarch64": 0xAA64}
+COMIMAGE_FLAGS_IL_LIBRARY = 0x4
+COMIMAGE_FLAGS_32BITPREFERRED = 0x20000
+
+
+def retarget_assembly(data, arch):
+    """Make an IL assembly that is tied to another CPU loadable on `arch`.
+
+    `dotnet publish -r linux-x64` stamps Machine=AMD64 into every IL-only
+    assembly it compiles; CoreCLR on aarch64 then refuses to load it
+    ("FileLoadException: Could not load file or assembly"). The IL itself is
+    CPU independent, so the Machine field is rewritten to the target CPU.
+    ReadyToRun images additionally carry precompiled code and native PE
+    structures for their CPU; they are turned back into plain IL images (the
+    native directories, entry point and ReadyToRun header are cleared, the
+    section layout and therefore every metadata RVA stays as it is), so the
+    runtime JIT-compiles the IL instead.
+
+    Returns (new_data, description) or (None, None) when nothing has to change.
+    """
+    target = ARCH_MACHINES[arch]
+    asm = load_assembly(data, "<retarget>")
+    if asm is None or not asm.il_only:
+        return None, None
+    out = bytearray(data)
+    flags = asm.cli_flags
+    changes = []
+    if asm.pe32_plus:
+        if asm.machine == target and not asm.ready_to_run:
+            return None, None
+        if asm.ready_to_run:
+            if asm.machine == target ^ R2R_OS_IDS["linux"]:
+                return None, None  # precompiled for this very platform
+            # export, import, exception, base relocation, TLS, load config,
+            # bound import, IAT and delay import directories: native only
+            for index in (0, 1, 3, 5, 9, 10, 11, 12, 13):
+                struct.pack_into("<II", out, asm.dirs_offset + 8 * index, 0, 0)
+            struct.pack_into("<I", out, asm.opt_offset + 16, 0)  # AddressOfEntryPoint
+            struct.pack_into("<II", out, asm.cli_offset + 64, 0, 0)  # ManagedNativeHeader
+            flags = (flags | COMIMAGE_FLAGS_ILONLY) & ~COMIMAGE_FLAGS_IL_LIBRARY
+            changes.append("ReadyToRun code for %s detached" % asm.arch)
+        if asm.machine != target:
+            changes.append("machine %s -> %s" % (asm.arch, arch))
+        struct.pack_into("<H", out, asm.lfanew + 4, target)
+    else:
+        if not flags & (COMIMAGE_FLAGS_32BITREQUIRED | COMIMAGE_FLAGS_32BITPREFERRED):
+            return None, None  # PE32 AnyCPU: already loadable everywhere
+        flags &= ~(COMIMAGE_FLAGS_32BITREQUIRED | COMIMAGE_FLAGS_32BITPREFERRED)
+        changes.append("32-bit requirement cleared")
+    struct.pack_into("<I", out, asm.cli_offset + 16, flags)
+    return bytes(out), ", ".join(changes)
+
+
 def load_assembly(data, name):
     try:
         return Assembly(data, name)
@@ -1047,6 +1108,7 @@ def inspect_dir(root, skip=()):
             "requires_32bit": asm.requires_32bit,
             "ready_to_run": asm.ready_to_run,
             "pe_machine": asm.arch,
+            "cpu_specific": asm.pe32_plus,
         }
         if not entry["framework_assembly"]:
             try:
@@ -1233,6 +1295,11 @@ def _summarise(report):
     mixed = [m["name"] for m in app if not m.get("il_only", True)]
     if mixed:
         verdict.append("Mixed-mode assemblies present: %s" % ", ".join(mixed))
+    tied = ["%s (%s)" % (os.path.basename(m["path"]), m["pe_machine"]) for m in app
+            if m.get("cpu_specific") and m.get("il_only", True) and "!/" not in m["path"]]
+    if tied:
+        verdict.append("IL assemblies stamped for one CPU, which another CPU's runtime refuses to "
+                       "load: %s. `prepare` retargets them." % ", ".join(sorted(tied)))
     if ok and main:
         verdict.append("IL game code found (%s, %s). It can run on an aarch64 %s runtime "
                        "once the x86_64 packaging is removed (`ypport.py prepare`)."
@@ -1295,6 +1362,8 @@ def print_report(r, out=sys.stdout):
         flags = []
         if m.get("ready_to_run"):
             flags.append("R2R")
+        elif m.get("cpu_specific"):
+            flags.append("%s-only" % m.get("pe_machine"))
         if not m.get("il_only", True):
             flags.append("MIXED-MODE")
         if m.get("steamworks_wrapper"):
@@ -1450,6 +1519,7 @@ class Preparer(object):
             env = self._prepare_dotnet(report, main)
         else:
             env = self._prepare_mono(report, main)
+        self._retarget_assemblies(report)
         self._install_replacements()
 
         engine = report["engine"] or {}
@@ -1600,6 +1670,37 @@ class Preparer(object):
                     self._rewrite(prefix + fn, new)
         return {"YP_MODE": "mono", "YP_ENTRY": main, "YP_APPDIR": app_dir or "."}
 
+    def _retarget_assemblies(self, report):
+        self.log("Retargeting CPU-specific IL assemblies to %s ..." % self.native_arch)
+        for m in report["managed"]:
+            rel = m["path"]
+            if "!/" in rel or rel in self.state["moved"] or not os.path.isfile(self._abs(rel)):
+                continue
+            with open(self._abs(rel), "rb") as f:
+                data = f.read()
+            new, what = retarget_assembly(data, self.native_arch)
+            if new is None:
+                continue
+            if load_assembly(new, rel) is None:
+                raise PrepareError("retargeting %s produced an unreadable image" % rel)
+            self._rewrite_bytes(rel, new, what)
+
+    def _rewrite_bytes(self, rel, data, what):
+        path = self._abs(rel)
+        self.log("  patch %-56s (%s)" % (rel, what))
+        if self.dry_run:
+            return
+        if rel not in self.state["rewritten"] and rel not in self.state["created"]:
+            bak = os.path.join(self.backup_dir, *rel.split("/"))
+            if not os.path.isdir(os.path.dirname(bak)):
+                os.makedirs(os.path.dirname(bak))
+            shutil.copy2(path, bak)
+            self.state["rewritten"].append(rel)
+        with open(path + ".yptmp", "wb") as f:
+            f.write(data)
+        os.rename(path + ".yptmp", path)
+        self._save_state()
+
     # -- natives -------------------------------------------------------------
     def _install_replacements(self):
         """Put an aarch64 build next to the game wherever an x86_64 library
@@ -1630,7 +1731,7 @@ class Preparer(object):
         self.log("Parking foreign-architecture native files ...")
         for item in report["native_libs"] + report["runtime_files"] + report["apphosts"]:
             p = item["path"]
-            if "!/" in p or item.get("format") != "elf" or item.get("arch") == "aarch64":
+            if "!/" in p or item.get("format") != "elf" or item.get("arch") == self.native_arch:
                 continue
             self._park(p, "%s ELF" % item.get("arch"))
 
@@ -1756,13 +1857,26 @@ def reset(gamedir, log=print):
         log("Discarded previous preparation state.")
 
 
-def is_prepared(gamedir):
+STATUS_OK, STATUS_NOT_PREPARED, STATUS_OUTDATED = 0, 1, 2
+
+
+def prepared_status(gamedir):
+    """STATUS_OK: prepared by this version and unchanged since.
+    STATUS_OUTDATED: prepared by another version of this tool; `restore`
+    and prepare again. STATUS_NOT_PREPARED: never prepared, or the game files
+    were copied again since (use `reset`)."""
     root = os.path.abspath(gamedir)
     try:
         state = _load_state(root)
-        return state.get("fingerprint") == fingerprint(root, state)
+        if state.get("fingerprint") != fingerprint(root, state):
+            return STATUS_NOT_PREPARED
     except (ValueError, KeyError, OSError, IOError):
-        return False
+        return STATUS_NOT_PREPARED
+    return STATUS_OK if state.get("version") == VERSION else STATUS_OUTDATED
+
+
+def is_prepared(gamedir):
+    return prepared_status(gamedir) == STATUS_OK
 
 
 # --------------------------------------------------------------------------
@@ -1802,7 +1916,8 @@ def main(argv=None):
     p = sub.add_parser("reset", help="forget a previous prepare, keep game files as they are")
     p.add_argument("dir")
 
-    p = sub.add_parser("status", help="exit 0 if the folder is prepared and unchanged")
+    p = sub.add_parser("status", help="exit 0 if prepared and unchanged, 2 if prepared by another "
+                                      "version of this tool, 1 otherwise")
     p.add_argument("dir")
 
     args = ap.parse_args(argv)
@@ -1849,7 +1964,7 @@ def main(argv=None):
         reset(args.dir)
         return 0
     if args.cmd == "status":
-        return 0 if is_prepared(args.dir) else 1
+        return prepared_status(args.dir)
     ap.print_help()
     return 1
 

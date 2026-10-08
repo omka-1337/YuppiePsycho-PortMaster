@@ -83,12 +83,17 @@ if [ -n "$FMOD_LIBDIR" ] && [ -f "$DATADIR/.ypport/launch.env" ]; then
 fi
 
 # --- first launch: make the copied game runnable on aarch64 -----------------
-if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" > /dev/null 2>&1; then
+python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" > /dev/null 2>&1
+setup_status=$?
+if [ $setup_status -ne 0 ]; then
   if ! command -v python3 > /dev/null 2>&1; then
     pm_message "python3 is required for the first-time setup."
     cleanup; sleep 5; exit 1
   fi
-  if [ -f "$DATADIR/.ypport/state.json" ]; then
+  if [ $setup_status -eq 2 ]; then
+    # Prepared by an older version of the port: undo it, then set up again.
+    python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"
+  elif [ -f "$DATADIR/.ypport/state.json" ]; then
     # The game was copied again (e.g. an update): forget the old setup.
     python3 "$GAMEDIR/tools/ypport.py" reset "$DATADIR"
   fi
