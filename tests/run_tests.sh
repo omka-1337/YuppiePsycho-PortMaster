@@ -258,6 +258,19 @@ else
   bad "assembling the runtime from NuGet"
 fi
 
+# --- memory watchdog: kills the game before the device runs out of memory -------
+echo "== memory watchdog"
+sleep 30 & victim=$!
+YP_MEMWATCH_MIN_MB=100000000 bash "$REPO/port/yuppiepsycho/tools/memwatch.sh" "$victim" "$WORK/memwatch.log"
+wait "$victim" 2>/dev/null; st=$?
+[ $st -eq 137 ] && grep -q "memwatch: out of memory" "$WORK/memwatch.log" \
+  && ok "watchdog kills a process when memory runs out" || bad "watchdog kill ($st)"
+sleep 1 & victim=$!
+bash "$REPO/port/yuppiepsycho/tools/memwatch.sh" "$victim" "$WORK/memwatch2.log"
+wait "$victim"; st=$?
+[ $st -eq 0 ] && grep -qE '^0 [0-9]+ ' "$WORK/memwatch2.log" && grep -q "peak game RSS" "$WORK/memwatch2.log" \
+  && ok "watchdog logs memory and leaves a healthy process alone" || bad "watchdog normal run ($st)"
+
 # --- NativeAOT builds carry no IL; they must be recognised and refused ----------
 echo "== nativeaot"
 if publish nativeaot $LX -p:TargetFramework=net8.0 -p:PublishAot=true; then

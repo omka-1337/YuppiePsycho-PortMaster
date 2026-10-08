@@ -179,6 +179,35 @@ entry points used by Steamworks.NET 15.0.1 / 20.1.0 / 20.2.0 / 2024.8.0 and Face
 - `YP_STEAM_STUB_TRACE=1` logs the first call of each entry point, which shows exactly which
   Steam features the game touches.
 
+## Memory on 1 GB devices
+
+Second boot on the RG40XX H: the retargeted `game.dll` loaded and the game started loading its
+content, then Mesa reported `DRM_IOCTL_PANFROST_CREATE_BO failed (err=12)` (ENOMEM: no memory
+left for a GPU buffer) and the device froze. The H700 has 1 GB of RAM shared by the system, the
+.NET runtime, the game and the Mali-G31; the game's PC minimum is 2 GB.
+
+What the launcher does about it:
+
+- **zram**: ROCKNIX has no swap by default. Without swap the kernel can only drop and re-read
+  file-backed pages, and once those are gone the device freezes. The launcher sets up 1 GB of
+  zstd-compressed zram for the run and removes it on exit - the same block as the
+  [Fear & Hunger port](https://github.com/omka-1337/FearAndHunger-PortMaster), where it took a
+  dungeon on an RG40XX V from 0.4 to 13-18 fps. GPU buffers cannot be swapped, but everything
+  else the game holds (the managed heap, decoded data waiting for upload, code) compresses.
+- **Watchdog** (`tools/memwatch.sh`): samples `/proc/meminfo` and the game's RSS twice a second
+  into `memlog.txt` and kills the game when available RAM and free swap are both below 64 MB, so
+  a run that does not fit ends with a message instead of a frozen device. The game also gets
+  `oom_score_adj=1000` so the kernel's OOM killer picks it first.
+- **.NET heap**: `DOTNET_GCConserveMemory=7` compacts (including the large object heap, where
+  decoded images land) instead of growing; `MALLOC_ARENA_MAX=2` limits native heap arenas.
+  `YP_GC_HEAP_LIMIT_MB` adds an optional hard cap.
+
+`memlog.txt` (shmem column = GPU buffers) and `ypport.py textures` (how much memory the game's
+images need once decoded, run on a PC) decide what comes next. If the decoded textures alone
+approach the free RAM, the options are reducing them at load time (half resolution or 16-bit
+formats for large images on a 640x480 screen) by hooking MonoGame's texture creation, or loading
+on demand where the game preloads.
+
 ## If the build is NativeAOT
 
 NativeAOT compiles the IL to machine code and drops it, so there is nothing to retarget. The
@@ -221,7 +250,8 @@ These need the real game and the device:
 
 1. ~~Run `inspect` on the real Steam Linux build~~ (done: .NET 8 self-contained, MonoGame 3.8.3
    DesktopGL + Theorafile, FMOD Core 2.02, Steamworks.NET 20.1).
-2. First boot on ROCKNIX / RG40XX H: logs, Steam behaviour (`YP_STEAM_STUB_TRACE=1`), FMOD banks.
+2. ~~First boot on ROCKNIX / RG40XX H~~: setup and runtime work; `game.dll` needed retargeting
+   (done); content loading runs out of memory - see "Memory on 1 GB devices".
 3. Video playback, resolution/scaling, controls.
 4. Performance: ReadyToRun precompilation, GC settings, swap.
 5. Screenshot/cover, test on other firmwares (muOS, Knulli, ArkOS), submit to PortMaster-New.

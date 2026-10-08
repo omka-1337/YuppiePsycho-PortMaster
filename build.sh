@@ -142,7 +142,7 @@ The game itself is not included. Yuppie Psycho (c) Baroque Decay.
 EOF
 
 echo "== zip"
-chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript"
+chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript" "$PORT/tools/memwatch.sh"
 rm -f "$DIST/yuppiepsycho.zip"
 (cd "$STAGE" && zip -q -r -X "$DIST/yuppiepsycho.zip" YuppiePsycho.sh yuppiepsycho)
 (cd "$DIST" && sha256sum yuppiepsycho.zip > yuppiepsycho.zip.sha256)

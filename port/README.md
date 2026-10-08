@@ -38,7 +38,24 @@ Create `ports/yuppiepsycho/settings.txt` to override defaults, for example:
 YP_STEAM_STUB=fake
 # Extra command line arguments for the game
 YP_ARGS=""
+# Size of the compressed swap (zram) set up on 1 GB devices, 0 = off (default 1024)
+YP_ZRAM_MB=1024
+# Use a swap file instead when the zram module is missing (written once, kept)
+YP_SWAP_FILE=/storage/yuppiepsycho.swap
+# Stop the game when available RAM and free swap both drop below this (MB, default 64)
+YP_MEMWATCH_MIN_MB=64
+# Optional hard cap for the .NET heap in MB (the game then fails with OutOfMemory instead)
+YP_GC_HEAP_LIMIT_MB=
 ```
+
+### Memory
+
+The RG40XX H and similar devices have 1 GB of RAM shared between the system, the game and the
+GPU, half of the game's PC minimum. The launcher therefore sets up 1 GB of compressed swap
+(zram, zstd) for the duration of the game, and runs a watchdog that stops the game before the
+device runs out of memory, because an exhausted 1 GB device freezes instead of recovering. The
+watchdog writes `ports/yuppiepsycho/memlog.txt` (available RAM, free swap, GPU/shmem, game memory,
+twice a second).
 
 The bundled aarch64 FMOD is 2.02.18, which accepts the game's 2.02 headers. If a future game
 update moves to another FMOD version and there is no sound, download the *FMOD Engine* for Linux
@@ -60,4 +77,5 @@ standard gamepad.
 - `ports/yuppiepsycho/log.txt` - last game run
 - `ports/yuppiepsycho/patchlog.txt` - first-time setup
 - `ports/yuppiepsycho/inspect.txt` - report about the game files when setup fails
+- `ports/yuppiepsycho/memlog.txt` - memory over time during the last run
 - To redo the setup from scratch, delete `gamedata/.ypport` **after** re-copying the game files.

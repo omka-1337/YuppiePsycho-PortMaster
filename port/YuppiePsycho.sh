@@ -58,7 +58,15 @@ fi
 FRAMEWORK_DIR="$(ls -d "$DOTNET_ROOT"/shared/Microsoft.NETCore.App/* 2>/dev/null | sort -V | tail -n 1)"
 export FRAMEWORK_DIR
 
+SWAPFILE=""
+YP_ZRAM=""
 cleanup() {
+  # Hand back the swap this run set up.
+  [ -n "$SWAPFILE" ] && $ESUDO swapoff "$SWAPFILE" 2>/dev/null
+  if [ -n "$YP_ZRAM" ]; then
+    $ESUDO swapoff "/dev/zram$YP_ZRAM" 2>/dev/null
+    echo "$YP_ZRAM" | $ESUDO tee /sys/class/zram-control/hot_remove > /dev/null 2>&1
+  fi
   [ -n "$DOTNET_MOUNT" ] && $ESUDO umount "$DOTNET_MOUNT" 2>/dev/null
 }
 
@@ -149,7 +157,62 @@ export DOTNET_TieredPGO=0
 export DOTNET_TC_QuickJitForLoops=1
 export DOTNET_EnableWriteXorExecute=0
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
+# Compact the heap (incl. the large object heap) instead of growing it.
+export DOTNET_GCConserveMemory="${YP_GC_CONSERVE:-7}"
+if [ -n "${YP_GC_HEAP_LIMIT_MB:-}" ]; then
+  DOTNET_GCHeapHardLimit="$(printf '0x%x' $((YP_GC_HEAP_LIMIT_MB * 1024 * 1024)))"
+  export DOTNET_GCHeapHardLimit
+fi
+export MALLOC_ARENA_MAX=2
 export YP_STEAM_STUB="${YP_STEAM_STUB:-off}"
+
+# --- compressed swap (zram) on 1 GB devices --------------------------------------
+# ROCKNIX on the H700 has no swap out of the box. Without it the kernel can only
+# drop file-backed pages (the runtime's and the game's code) and re-read them from
+# the SD card, and once that runs out the device freezes. Same block as the Fear &
+# Hunger port, which measured 0.4 fps without and 13-18 fps with 1 GB of zstd zram
+# on an RG40XX V. GPU buffers stay in RAM either way; everything else compresses.
+# YP_ZRAM_MB=0 turns this off; YP_SWAP_FILE=/path adds a swap file instead when
+# zram is unavailable.
+mem_total_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+zram_mb="${YP_ZRAM_MB:-}"
+if [ -z "$zram_mb" ]; then
+  if [ "${mem_total_mb:-0}" -lt 1800 ]; then zram_mb=1024; else zram_mb=0; fi
+fi
+have_swap() { [ "$(awk 'NR > 1 { n++ } END { print n + 0 }' /proc/swaps)" != "0" ]; }
+if [ "$zram_mb" -gt 0 ] && ! have_swap; then
+  [ -e /sys/class/zram-control/hot_add ] || $ESUDO modprobe zram 2>/dev/null
+  if [ -e /sys/class/zram-control/hot_add ]; then
+    zram_id=$($ESUDO cat /sys/class/zram-control/hot_add 2>/dev/null)
+    if [ -n "$zram_id" ] && [ -b "/dev/zram$zram_id" ]; then
+      echo zstd | $ESUDO tee "/sys/block/zram$zram_id/comp_algorithm" > /dev/null 2>&1
+      if echo "${zram_mb}M" | $ESUDO tee "/sys/block/zram$zram_id/disksize" > /dev/null 2>&1 &&
+         $ESUDO mkswap "/dev/zram$zram_id" > /dev/null 2>&1 &&
+         $ESUDO swapon -p 100 "/dev/zram$zram_id" 2>/dev/null; then
+        YP_ZRAM="$zram_id"
+        echo "zram swap enabled on /dev/zram$zram_id (${zram_mb} MB, zstd)"
+      else
+        echo "$zram_id" | $ESUDO tee /sys/class/zram-control/hot_remove > /dev/null 2>&1
+      fi
+    fi
+  fi
+fi
+if [ -n "${YP_SWAP_FILE:-}" ] && ! have_swap; then
+  swap_mb="${YP_SWAP_MB:-1024}"
+  if [ "$(stat -c %s "$YP_SWAP_FILE" 2>/dev/null)" != "$((swap_mb * 1024 * 1024))" ]; then
+    echo "Creating a ${swap_mb} MB swap file at $YP_SWAP_FILE (only once) ..." | tee /dev/tty0
+    $ESUDO rm -f "$YP_SWAP_FILE"
+    { $ESUDO dd if=/dev/zero of="$YP_SWAP_FILE" bs=1M count="$swap_mb" 2>/dev/null &&
+      $ESUDO chmod 600 "$YP_SWAP_FILE" && $ESUDO mkswap "$YP_SWAP_FILE" > /dev/null; } ||
+      $ESUDO rm -f "$YP_SWAP_FILE"
+  fi
+  [ -f "$YP_SWAP_FILE" ] && $ESUDO swapon "$YP_SWAP_FILE" 2>/dev/null && SWAPFILE="$YP_SWAP_FILE"
+fi
+if ! have_swap && [ "${mem_total_mb:-0}" -lt 1800 ]; then
+  echo "WARNING: no swap could be set up (zram module missing?). On 1 GB the game is likely"
+  echo "to run out of memory; the watchdog will stop it before the device freezes."
+fi
+echo "memory: $(awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { printf "%s %d MB  ", $1, $2 / 1024 }' /proc/meminfo)"
 
 $ESUDO chmod 666 /dev/uinput 2>/dev/null
 
@@ -157,6 +220,23 @@ echo "ypport: mode=$YP_MODE entry=$YP_ENTRY engine=$YP_ENGINE $YP_ENGINE_VERSION
      "fmod=$YP_FMOD_VERSION runtime=$FRAMEWORK_DIR"
 
 cd "$DATADIR/$YP_APPDIR" || { cleanup; exit 1; }
+
+# Runs the game with the memory watchdog next to it: on 1 GB devices a game
+# that exhausts memory otherwise freezes the whole system.
+run_game() {
+  "$@" $YP_ARGS &
+  game_pid=$!
+  bash "$GAMEDIR/tools/memwatch.sh" "$game_pid" "$GAMEDIR/memlog.txt" &
+  wait "$game_pid"
+  rc=$?
+  sleep 1
+  if grep -q "memwatch: out of memory" "$GAMEDIR/memlog.txt" 2>/dev/null; then
+    grep "memwatch:" "$GAMEDIR/memlog.txt"
+    pm_message "Yuppie Psycho ran out of memory and was stopped. See yuppiepsycho/memlog.txt."
+    sleep 5
+  fi
+  tail -n 1 "$GAMEDIR/memlog.txt" 2>/dev/null
+}
 
 if [ "$YP_MODE" = "mono" ]; then
   # Older .NET Framework style builds run on PortMaster's Mono runtime.
@@ -172,14 +252,12 @@ if [ "$YP_MODE" = "mono" ]; then
   export PATH="$monodir/bin:$PATH"
   $GPTOKEYB "mono" &
   command -v pm_platform_helper > /dev/null && pm_platform_helper "$monodir/bin/mono"
-  mono "$(basename "$YP_ENTRY")" $YP_ARGS
-  rc=$?
+  run_game mono "$(basename "$YP_ENTRY")"
   $ESUDO umount "$monodir"
 else
   $GPTOKEYB "dotnet" &
   command -v pm_platform_helper > /dev/null && pm_platform_helper "$DOTNET_ROOT/dotnet"
-  "$DOTNET_ROOT/dotnet" "$(basename "$YP_ENTRY")" $YP_ARGS
-  rc=$?
+  run_game "$DOTNET_ROOT/dotnet" "$(basename "$YP_ENTRY")"
 fi
 echo "Yuppie Psycho exited with status $rc"
 

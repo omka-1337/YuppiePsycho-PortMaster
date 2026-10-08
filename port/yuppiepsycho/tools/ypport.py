@@ -1398,6 +1398,229 @@ def _json_default(o):
 
 
 # --------------------------------------------------------------------------
+# Texture survey (how much memory the game's images need once decoded)
+# --------------------------------------------------------------------------
+
+# Bytes per pixel on the GPU for MonoGame SurfaceFormat values.
+SURFACE_BPP = {0: 4, 1: 2, 2: 2, 3: 2, 4: 0.5, 5: 1, 6: 1, 7: 2, 8: 4, 9: 4, 10: 4, 11: 8,
+               12: 1, 13: 4, 14: 8, 15: 16, 16: 2, 17: 4, 18: 8, 19: 8, 20: 4, 21: 4,
+               60: 0.5, 61: 0.5, 62: 1, 63: 1, 64: 0.5, 65: 1, 66: 1}
+SURFACE_NAMES = {0: "Color", 1: "Bgr565", 2: "Bgra5551", 3: "Bgra4444", 4: "Dxt1", 5: "Dxt3",
+                 6: "Dxt5", 12: "Alpha8", 20: "Bgr32", 21: "Bgra32"}
+COMPRESSED_FORMATS = (4, 5, 6, 60, 61, 62, 63, 64, 65, 66)
+
+
+def lz4_block_prefix(src, want):
+    """Decode the first `want` bytes of an LZ4 block (enough for headers)."""
+    out = bytearray()
+    i, n = 0, len(src)
+    while i < n and len(out) < want:
+        token = src[i]
+        i += 1
+        lit = token >> 4
+        if lit == 15:
+            while True:
+                b = src[i]
+                i += 1
+                lit += b
+                if b != 255:
+                    break
+        out += src[i:i + lit]
+        i += lit
+        if i >= n or len(out) >= want:
+            break
+        offset = src[i] | (src[i + 1] << 8)
+        i += 2
+        length = token & 15
+        if length == 15:
+            while True:
+                b = src[i]
+                i += 1
+                length += b
+                if b != 255:
+                    break
+        length += 4
+        start = len(out) - offset
+        if offset == 0 or start < 0:
+            raise ValueError("corrupt LZ4 data")
+        for k in range(length):
+            out.append(out[start + k])
+    return bytes(out[:want])
+
+
+def _read_7bit(data, p):
+    value = shift = 0
+    while True:
+        b = data[p]
+        p += 1
+        value |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return value, p
+        shift += 7
+
+
+def xnb_texture_info(path):
+    """(width, height, surface_format, levels) of an XNB Texture2D, or a
+    string explaining why it could not be read."""
+    with open(path, "rb") as f:
+        head = f.read(14)
+        if len(head) < 10 or head[:3] != b"XNB":
+            return "not an XNB file"
+        flags = head[5]
+        if flags & 0x80:
+            return "LZX-compressed"
+        if flags & 0x40:
+            f.seek(14)
+            data = lz4_block_prefix(f.read(4096), 1024)
+        else:
+            f.seek(10)
+            data = f.read(1024)
+    try:
+        count, p = _read_7bit(data, 0)
+        readers = []
+        for _ in range(count):
+            n, p = _read_7bit(data, p)
+            readers.append(data[p:p + n].decode("utf-8", "replace"))
+            p += n + 4
+        _shared, p = _read_7bit(data, p)
+        type_id, p = _read_7bit(data, p)
+        if not 0 < type_id <= len(readers) or "Texture2DReader" not in readers[type_id - 1]:
+            return "not a texture (%s)" % (readers[type_id - 1].split(",")[0] if 0 < type_id <= len(readers) else "?")
+        fmt, width, height, levels = struct.unpack_from("<iIII", data, p)
+        return width, height, fmt, levels
+    except (IndexError, struct.error):
+        return "unreadable header"
+
+
+def image_size(path):
+    """(width, height) of a PNG/JPEG/BMP/GIF/DDS file, or None."""
+    with open(path, "rb") as f:
+        head = f.read(32)
+        if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+            return struct.unpack(">II", head[16:24])
+        if head[:2] == b"BM" and len(head) >= 26:
+            w, h = struct.unpack_from("<ii", head, 18)
+            return abs(w), abs(h)
+        if head[:4] in (b"GIF8",):
+            return struct.unpack_from("<HH", head, 6)
+        if head[:4] == b"DDS " and len(head) >= 20:
+            h, w = struct.unpack_from("<II", head, 12)
+            return w, h
+        if head[:2] == b"\xff\xd8":
+            f.seek(2)
+            while True:
+                marker = f.read(4)
+                if len(marker) < 4 or marker[0] != 0xFF:
+                    return None
+                code, length = marker[1], struct.unpack(">H", marker[2:4])[0]
+                if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">xHH", f.read(5))
+                    return w, h
+                f.seek(length - 2, 1)
+    return None
+
+
+def survey_textures(root, top=20):
+    root = os.path.abspath(root)
+    images = []
+    other = {}
+    problems = {}
+    for path in _walk(root):
+        rel = _rel(root, path)
+        lower = rel.lower()
+        ext = os.path.splitext(lower)[1]
+        size = os.path.getsize(path)
+        kind = None
+        if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".dds"):
+            try:
+                dims = image_size(path)
+            except (IOError, OSError, struct.error):
+                dims = None
+            if dims:
+                w, h = dims
+                images.append((w * h * 4, w, h, "RGBA (decoded %s)" % ext[1:], rel, size))
+                continue
+            kind = "unreadable images"
+        elif ext == ".xnb":
+            info = xnb_texture_info(path)
+            if isinstance(info, tuple):
+                w, h, fmt, levels = info
+                bpp = SURFACE_BPP.get(fmt, 4)
+                gpu = int(w * h * bpp * (4.0 / 3 if levels > 1 else 1))
+                name = SURFACE_NAMES.get(fmt, "format %d" % fmt)
+                if fmt in COMPRESSED_FORMATS:
+                    name += " (compressed)"
+                images.append((gpu, w, h, name, rel, size))
+                continue
+            problems[info] = problems.get(info, 0) + 1
+            kind = "xnb: " + info.split(" (")[0]
+        elif ext in (".ogg", ".wav", ".mp3", ".bank", ".fsb", ".fev"):
+            kind = "audio"
+        elif ext in (".ogv", ".webm", ".mp4", ".bik", ".avi"):
+            kind = "video"
+        else:
+            kind = "other"
+        n, total = other.get(kind, (0, 0))
+        other[kind] = (n + 1, total + size)
+
+    images.sort(reverse=True)
+    total_gpu = sum(i[0] for i in images)
+    return {
+        "root": root,
+        "images": len(images),
+        "decoded_bytes": total_gpu,
+        "file_bytes": sum(i[5] for i in images),
+        "largest": images[:top],
+        "over_2048": sum(1 for i in images if max(i[1], i[2]) > 2048),
+        "over_4096": sum(1 for i in images if max(i[1], i[2]) > 4096),
+        "over_8192": sum(1 for i in images if max(i[1], i[2]) > 8192),
+        "by_dir": _sum_by_dir(images),
+        "formats": _count_by(images, 3),
+        "other": other,
+    }
+
+
+def _sum_by_dir(images):
+    out = {}
+    for gpu, _w, _h, _fmt, rel, _size in images:
+        top = rel.split("/")[0] if "/" in rel else "."
+        n, total = out.get(top, (0, 0))
+        out[top] = (n + 1, total + gpu)
+    return out
+
+
+def _count_by(images, index):
+    out = {}
+    for item in images:
+        out[item[index]] = out.get(item[index], 0) + 1
+    return out
+
+
+def print_textures(r, out=sys.stdout):
+    w = out.write
+    w("ypport textures - %s\n" % r["root"])
+    w("=" * 72 + "\n")
+    w("Images: %d files, %s on disk, %s once decoded for the GPU\n" % (
+        r["images"], human(r["file_bytes"]), human(r["decoded_bytes"])))
+    w("Larger than 2048 px: %d, than 4096 px: %d, than 8192 px: %d\n" % (
+        r["over_2048"], r["over_4096"], r["over_8192"]))
+    w("\nBy top-level folder (decoded size):\n")
+    for d, (n, total) in sorted(r["by_dir"].items(), key=lambda kv: -kv[1][1]):
+        w("  %-30s %6d images  %10s\n" % (d, n, human(total)))
+    w("\nFormats:\n")
+    for fmt, n in sorted(r["formats"].items(), key=lambda kv: -kv[1]):
+        w("  %-36s %6d\n" % (fmt, n))
+    w("\nLargest images (decoded size, dimensions, file):\n")
+    for gpu, width, height, fmt, rel, _size in r["largest"]:
+        w("  %10s  %5dx%-5d  %s\n" % (human(gpu), width, height, rel))
+    if r["other"]:
+        w("\nOther files:\n")
+        for kind, (n, total) in sorted(r["other"].items(), key=lambda kv: -kv[1][1]):
+            w("  %-36s %6d files  %10s\n" % (kind, n, human(total)))
+    w("\n")
+
+
+# --------------------------------------------------------------------------
 # prepare / restore
 # --------------------------------------------------------------------------
 
@@ -1892,6 +2115,11 @@ def main(argv=None):
     p.add_argument("dir")
     p.add_argument("--json", action="store_true", help="print JSON instead of text")
 
+    p = sub.add_parser("textures", help="how much memory the game's images need once decoded")
+    p.add_argument("dir")
+    p.add_argument("--top", type=int, default=20, help="list this many of the largest images")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("extract", help="extract a .NET single-file bundle")
     p.add_argument("bundle")
     p.add_argument("outdir")
@@ -1929,6 +2157,14 @@ def main(argv=None):
         else:
             print_report(r)
         return 0 if r["portable"] else 2
+    if args.cmd == "textures":
+        r = survey_textures(args.dir, top=args.top)
+        if args.json:
+            json.dump(r, sys.stdout, indent=1, default=_json_default)
+            sys.stdout.write("\n")
+        else:
+            print_textures(r)
+        return 0
     if args.cmd == "extract":
         b = Bundle(args.bundle)
         print("bundle v%d.%d, id %s, %d files%s" % (b.major, b.minor, b.bundle_id, len(b.entries),

@@ -146,6 +146,64 @@ class ElfTests(unittest.TestCase):
                         .startswith("2021-12"))
 
 
+def _lz4_literals(data):
+    """A valid LZ4 block made of one literal run (what a non-compressing
+    encoder would emit)."""
+    n = len(data)
+    out = bytearray()
+    if n < 15:
+        out.append(n << 4)
+    else:
+        out.append(0xF0)
+        rest = n - 15
+        while rest >= 255:
+            out.append(255)
+            rest -= 255
+        out.append(rest)
+    return bytes(out) + data
+
+
+def _xnb_texture(width, height, fmt=0, levels=1, lz4=False):
+    reader = b"Microsoft.Xna.Framework.Content.Texture2DReader, MonoGame.Framework"
+    payload = bytes([1, len(reader)]) + reader + struct.pack("<i", 0) + bytes([0, 1])
+    payload += struct.pack("<iIII", fmt, width, height, levels) + b"\0" * 64
+    if lz4:
+        body = struct.pack("<I", len(payload)) + _lz4_literals(payload)
+        return b"XNBw\x05\x40" + struct.pack("<I", 10 + len(body)) + body
+    return b"XNBw\x05\x00" + struct.pack("<I", 10 + len(payload)) + payload
+
+
+class TextureSurveyTests(unittest.TestCase):
+    def test_lz4_with_match(self):
+        block = bytes([(3 << 4) | 5]) + b"abc" + struct.pack("<H", 3)  # "abc" + copy 9 from 3 back
+        self.assertEqual(ypport.lz4_block_prefix(block, 100), b"abcabcabcabc")
+        self.assertEqual(ypport.lz4_block_prefix(_lz4_literals(b"x" * 300), 300), b"x" * 300)
+
+    def test_survey(self):
+        tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmp, "content", "gfx"))
+        os.makedirs(os.path.join(tmp, "res"))
+        png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">IIBBBBB", 2048, 1024, 8, 6, 0, 0, 0)
+        with open(os.path.join(tmp, "res", "atlas.png"), "wb") as f:
+            f.write(png + b"\0" * 16)
+        with open(os.path.join(tmp, "res", "photo.jpg"), "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + struct.pack(">H", 4) + b"JF" +
+                    b"\xff\xc0" + struct.pack(">HBHH", 17, 8, 720, 1280) + b"\0" * 16)
+        with open(os.path.join(tmp, "content", "gfx", "a.xnb"), "wb") as f:
+            f.write(_xnb_texture(512, 256))
+        with open(os.path.join(tmp, "content", "gfx", "b.xnb"), "wb") as f:
+            f.write(_xnb_texture(4096, 4096, fmt=6, lz4=True))
+        with open(os.path.join(tmp, "content", "music.ogg"), "wb") as f:
+            f.write(b"OggS" + b"\0" * 100)
+        r = ypport.survey_textures(tmp)
+        self.assertEqual(r["images"], 4)
+        expected = 2048 * 1024 * 4 + 1280 * 720 * 4 + 512 * 256 * 4 + 4096 * 4096 * 1
+        self.assertEqual(r["decoded_bytes"], expected)
+        self.assertEqual(r["largest"][0][4], "content/gfx/b.xnb")
+        self.assertEqual(r["over_2048"], 1)
+        self.assertEqual(r["other"]["audio"][0], 1)
+
+
 class RewriteTests(unittest.TestCase):
     def test_unpin_dllmaps(self):
         src = ('<configuration>\n'

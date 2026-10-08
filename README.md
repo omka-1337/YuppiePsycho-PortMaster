@@ -7,9 +7,11 @@ emulation: the game's own code runs on an aarch64 .NET runtime.
 > **Status: experimental.** The inspector has been run on the real Steam Linux build: it is a
 > self-contained **.NET 8** MonoGame 3.8.3 DesktopGL app with IL game code (no NativeAOT), FMOD
 > Core 2.02, Theorafile video and Steamworks.NET 20.1, which the port covers. On the RG40XX H
-> (ROCKNIX, Mesa OpenGL 3.1) the setup ran through and the bundled runtime started; loading
-> `game.dll` then failed because the assembly is stamped x86_64-only, which the setup now fixes
-> (see [docs/TECHNICAL.md](docs/TECHNICAL.md#cpu-stamped-il-assemblies)). Every piece is tested
+> (ROCKNIX, Mesa OpenGL 3.1) the setup runs, the bundled runtime starts and, after retargeting
+> the x86_64-stamped `game.dll` (see [docs/TECHNICAL.md](docs/TECHNICAL.md#cpu-stamped-il-assemblies)),
+> the game starts loading its content - and runs out of the device's 1 GB of RAM. The launcher
+> now sets up zram, watches memory and stops the game before the device freezes; see
+> [docs/TECHNICAL.md](docs/TECHNICAL.md#memory-on-1-gb-devices). Every piece is tested
 > against real .NET SDK output and a MonoGame stand-in game with the same shape (see
 > [Testing](#testing)).
 
@@ -73,6 +75,13 @@ on Windows `C:\Program Files (x86)\Steam\steamapps\common\Yuppie Psycho`. The re
 `--json` prints the full data. Sharing this report is the fastest way to find out what, if
 anything, still needs work for the real game.
 
+To see how much memory the game's images need once decoded (the main question on a 1 GB
+device):
+
+```
+python3 port/yuppiepsycho/tools/ypport.py textures "/path/to/Yuppie Psycho"
+```
+
 ## Step 2: build the package
 
 On a Linux PC with `python3`, `git`, `curl` and `zip`:
@@ -133,7 +142,7 @@ the setup refuses a build). Per-user settings go into `ports/yuppiepsycho/settin
 | `tests/run_tests.sh` | publishes a MonoGame + FMOD wrapper + Steamworks.NET + Theorafile-binding stand-in game in seven packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, **self-contained .NET 8 with shipped x86_64 libraries like Yuppie Psycho**, NativeAOT), then inspect -> prepare -> **run on .NET 8** (incl. decoding a Theora video through the C# binding) -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes; update detection; game folder copied as a whole; the runtime assembled from NuGet packages (linux-x64 counterpart of the bundled linux-arm64 one) runs the game; the device scenario **mirrored**: linux-arm64 builds (aarch64 runtime and libraries, ARM64-stamped and ReadyToRun assemblies) prepared for and run on x86_64; upgrade of a folder prepared by release 0.1.0 | .NET 8 SDK, zig, ffmpeg |
 | `tests/launcher_sim.sh` | runs the real `YuppiePsycho.sh` on x86_64 inside a fake PortMaster install: first-launch setup with library replacement, second launch without setup, Steam stub, video | .NET 8 SDK |
 
-Current result: 90/90 end-to-end checks and 12/12 unit tests pass.
+Current result: 92/92 end-to-end checks and 14/14 unit tests pass.
 
 What the tests cannot cover is listed in [docs/TECHNICAL.md](docs/TECHNICAL.md#open-questions):
 rendering on the Mali-G31 GPU, memory on a 1 GB device, video decoding speed and the 640x480
