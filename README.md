@@ -147,7 +147,7 @@ the setup refuses a build). Per-user settings go into `ports/yuppiepsycho/settin
 | `tests/run_tests.sh` | publishes a MonoGame + FMOD wrapper + Steamworks.NET + Theorafile-binding stand-in game in seven packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, **self-contained .NET 8 with shipped x86_64 libraries like Yuppie Psycho**, NativeAOT), then inspect -> prepare -> **run on .NET 8** (incl. decoding a Theora video through the C# binding) -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes; update detection; game folder copied as a whole; the runtime assembled from NuGet packages (linux-x64 counterpart of the bundled linux-arm64 one) runs the game; the device scenario **mirrored**: linux-arm64 builds (aarch64 runtime and libraries, ARM64-stamped and ReadyToRun assemblies) prepared for and run on x86_64; upgrade of a folder prepared by release 0.1.0; 16-bit texture conversion with every converted texture loaded by MonoGame's ContentManager and drawn under Xvfb, pixel-compared | .NET 8 SDK, zig, ffmpeg, Xvfb |
 | `tests/launcher_sim.sh` | runs the real `YuppiePsycho.sh` on x86_64 inside a fake PortMaster install: first-launch setup with library replacement, second launch without setup, Steam stub, video | .NET 8 SDK |
 
-Current result: 105/105 end-to-end checks and 18/18 unit tests pass.
+Current result: 107/107 end-to-end checks and 18/18 unit tests pass.
 
 What the tests cannot cover is listed in [docs/TECHNICAL.md](docs/TECHNICAL.md#open-questions):
 rendering on the Mali-G31 GPU, memory on a 1 GB device, video decoding speed and the 640x480

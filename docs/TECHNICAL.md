@@ -203,6 +203,14 @@ What the launcher does about it:
   decoded images land) instead of growing; `MALLOC_ARENA_MAX=2` limits native heap arenas.
   `YP_GC_HEAP_LIMIT_MB` adds an optional hard cap.
 
+Third boot (zram up, watchdog running, only 9 atlases converted): `memlog.txt` shows shmem -
+i.e. GPU buffers - climbing from 18 MB to 702 MB within 63 seconds while available RAM fell
+to ~50 MB, the game's own pages moved into zram (RSS 160 -> 8 MB, 125 MB swapped) and 727 MB
+of zram stayed free. **The game uploads essentially all of its atlases at startup**, and pinned
+GPU buffers cannot be swapped, so zram cannot help with them. The watchdog did not fire because
+it treated free swap as headroom; it now ignores swap once GPU buffers exceed half of RAM, and
+runs at a higher priority so a thrashing system does not starve it.
+
 `ypport.py textures` on the real game: **62 texture atlases, 2048x2048 or smaller, all
 `SurfaceFormat.Color`, 747.6 MB decoded** (50 MB on disk: LZ4-compressed XNB, mostly transparent
 space). That alone exceeds what a 1 GB device can give the GPU if the game holds all of them.

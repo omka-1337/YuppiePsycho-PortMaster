@@ -317,6 +317,25 @@ wait "$victim"; st=$?
 [ $st -eq 0 ] && grep -qE '^0 [0-9]+ ' "$WORK/memwatch2.log" && grep -q "peak game RSS" "$WORK/memwatch2.log" \
   && ok "watchdog logs memory and leaves a healthy process alone" || bad "watchdog normal run ($st)"
 
+# The device case from the RG40XX H: 700 MB of pinned GPU buffers, little RAM
+# left and plenty of zram that cannot help. Free swap must not count there.
+fake_meminfo() { # avail swapfree shmem (MB)
+  printf 'MemTotal: %d kB\nMemAvailable: %d kB\nSwapTotal: %d kB\nSwapFree: %d kB\nShmem: %d kB\n' \
+    $((975 * 1024)) $(($1 * 1024)) $((1023 * 1024)) $(($2 * 1024)) $(($3 * 1024)) > "$WORK/meminfo"
+}
+fake_meminfo 48 727 702
+sleep 30 & victim=$!
+YP_MEMWATCH_MEMINFO="$WORK/meminfo" bash "$REPO/port/yuppiepsycho/tools/memwatch.sh" "$victim" "$WORK/memwatch3.log"
+wait "$victim" 2>/dev/null; st=$?
+[ $st -eq 137 ] && ok "watchdog acts when GPU buffers fill RAM, free zram notwithstanding" \
+  || bad "watchdog with pinned GPU memory ($st)"
+fake_meminfo 48 727 100
+sleep 2 & victim=$!
+YP_MEMWATCH_MEMINFO="$WORK/meminfo" bash "$REPO/port/yuppiepsycho/tools/memwatch.sh" "$victim" "$WORK/memwatch4.log"
+wait "$victim"; st=$?
+[ $st -eq 0 ] && ok "watchdog lets swap absorb pressure while GPU buffers are small" \
+  || bad "watchdog with swappable memory ($st)"
+
 # --- NativeAOT builds carry no IL; they must be recognised and refused ----------
 echo "== nativeaot"
 if publish nativeaot $LX -p:TargetFramework=net8.0 -p:PublishAot=true; then

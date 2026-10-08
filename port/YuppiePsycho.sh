@@ -235,7 +235,12 @@ cd "$DATADIR/$YP_APPDIR" || { cleanup; exit 1; }
 run_game() {
   "$@" $YP_ARGS &
   game_pid=$!
-  bash "$GAMEDIR/tools/memwatch.sh" "$game_pid" "$GAMEDIR/memlog.txt" &
+  # Higher priority, so a thrashing system does not starve the watchdog itself.
+  if [ "$(id -u)" = 0 ]; then
+    nice -n -10 bash "$GAMEDIR/tools/memwatch.sh" "$game_pid" "$GAMEDIR/memlog.txt" &
+  else
+    bash "$GAMEDIR/tools/memwatch.sh" "$game_pid" "$GAMEDIR/memlog.txt" &
+  fi
   wait "$game_pid"
   rc=$?
   sleep 1
