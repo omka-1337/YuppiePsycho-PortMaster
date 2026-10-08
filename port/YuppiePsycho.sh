@@ -90,8 +90,16 @@ if [ -n "$FMOD_LIBDIR" ] && [ -f "$DATADIR/.ypport/launch.env" ]; then
   fi
 fi
 
+# Texture atlases need ~750 MB decoded; on 1 GB devices store those with binary
+# alpha (most of them) as 16-bit Bgra5551 - half the memory, alpha unchanged.
+mem_total_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+if [ -z "${YP_TEXTURES:-}" ]; then
+  if [ "${mem_total_mb:-0}" -lt 1800 ]; then YP_TEXTURES=auto16; else YP_TEXTURES=full; fi
+fi
+export YP_TEXTURES
+
 # --- first launch: make the copied game runnable on aarch64 -----------------
-python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" > /dev/null 2>&1
+python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" > /dev/null 2>&1
 setup_status=$?
 if [ $setup_status -ne 0 ]; then
   if ! command -v python3 > /dev/null 2>&1; then
@@ -99,7 +107,8 @@ if [ $setup_status -ne 0 ]; then
     cleanup; sleep 5; exit 1
   fi
   if [ $setup_status -eq 2 ]; then
-    # Prepared by an older version of the port: undo it, then set up again.
+    # Prepared by an older version of the port or with another texture mode:
+    # undo it, then set up again.
     python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"
   elif [ -f "$DATADIR/.ypport/state.json" ]; then
     # The game was copied again (e.g. an update): forget the old setup.
@@ -108,13 +117,13 @@ if [ $setup_status -ne 0 ]; then
   if [ -f "$controlfolder/utils/patcher.txt" ]; then
     export PATCHER_FILE="$GAMEDIR/tools/patchscript"
     export PATCHER_GAME="Yuppie Psycho"
-    export PATCHER_TIME="1 to 3 minutes"
+    export PATCHER_TIME="2 to 10 minutes"
     source "$controlfolder/utils/patcher.txt"
   else
     $ESUDO chmod 666 /dev/tty0 2>/dev/null
     bash "$GAMEDIR/tools/patchscript" 2>&1 | tee /dev/tty0
   fi
-  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" > /dev/null 2>&1; then
+  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" > /dev/null 2>&1; then
     pm_message "Setup failed. See yuppiepsycho/patchlog.txt and yuppiepsycho/log.txt."
     cleanup; sleep 5; exit 1
   fi
@@ -174,7 +183,6 @@ export YP_STEAM_STUB="${YP_STEAM_STUB:-off}"
 # on an RG40XX V. GPU buffers stay in RAM either way; everything else compresses.
 # YP_ZRAM_MB=0 turns this off; YP_SWAP_FILE=/path adds a swap file instead when
 # zram is unavailable.
-mem_total_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
 zram_mb="${YP_ZRAM_MB:-}"
 if [ -z "$zram_mb" ]; then
   if [ "${mem_total_mb:-0}" -lt 1800 ]; then zram_mb=1024; else zram_mb=0; fi

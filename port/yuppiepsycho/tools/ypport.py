@@ -38,7 +38,7 @@ try:
 except ImportError:  # pragma: no cover
     from pipes import quote as shquote
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 STATE_DIR = ".ypport"
 
 # --------------------------------------------------------------------------
@@ -1448,6 +1448,223 @@ def lz4_block_prefix(src, want):
     return bytes(out[:want])
 
 
+def lz4_block_decompress(src, size):
+    """Decode a complete LZ4 block of known output size (C-speed slices)."""
+    out = bytearray()
+    i, n = 0, len(src)
+    while i < n:
+        token = src[i]
+        i += 1
+        lit = token >> 4
+        if lit == 15:
+            while True:
+                b = src[i]
+                i += 1
+                lit += b
+                if b != 255:
+                    break
+        out += src[i:i + lit]
+        i += lit
+        if i >= n:
+            break
+        offset = src[i] | (src[i + 1] << 8)
+        i += 2
+        length = token & 15
+        if length == 15:
+            while True:
+                b = src[i]
+                i += 1
+                length += b
+                if b != 255:
+                    break
+        length += 4
+        start = len(out) - offset
+        if offset == 0 or start < 0:
+            raise ValueError("corrupt LZ4 data")
+        if offset >= length:
+            out += out[start:start + length]
+        else:
+            pattern = bytes(out[start:])
+            out += (pattern * (length // offset + 1))[:length]
+    if len(out) != size:
+        raise ValueError("LZ4 data decoded to %d bytes, expected %d" % (len(out), size))
+    return bytes(out)
+
+
+_RUN_RE = re.compile(br"(?s)(.)\1{15,}")
+
+
+def lz4_block_compress_runs(data):
+    """Encode data as an LZ4 block that only compresses runs of a repeated
+    byte (offset-1 matches). Fast in pure Python and enough for textures,
+    whose transparent areas are long runs of zeros."""
+    out = bytearray()
+    n = len(data)
+    limit = n - 12  # LZ4: the last match must start 12 bytes before the end
+
+    def length_bytes(value):
+        b = bytearray()
+        while value >= 255:
+            b.append(255)
+            value -= 255
+        b.append(value)
+        return b
+
+    pos = 0
+    for m in _RUN_RE.finditer(data):
+        start = m.start() + 1  # the run's first byte goes out as a literal
+        end = min(m.end(), limit)
+        length = end - start
+        if start >= limit or length < 4:
+            continue
+        lit = start - pos
+        token = (min(lit, 15) << 4) | min(length - 4, 15)
+        out.append(token)
+        if lit >= 15:
+            out += length_bytes(lit - 15)
+        out += data[pos:start]
+        out += b"\x01\x00"
+        if length - 4 >= 15:
+            out += length_bytes(length - 4 - 15)
+        pos = end
+    lit = n - pos
+    out.append(min(lit, 15) << 4)
+    if lit >= 15:
+        out += length_bytes(lit - 15)
+    out += data[pos:]
+    return bytes(out)
+
+
+class XnbFile(object):
+    """An XNB container: header fields plus the decompressed payload."""
+
+    def __init__(self, path):
+        with open(path, "rb") as f:
+            raw = f.read()
+        if len(raw) < 10 or raw[:3] != b"XNB":
+            raise ValueError("not an XNB file")
+        self.platform = raw[3:4]
+        self.version = raw[4]
+        self.flags = raw[5]
+        if self.flags & 0x80:
+            raise ValueError("LZX-compressed XNB files are not supported")
+        if self.flags & 0x40:
+            size = struct.unpack_from("<I", raw, 10)[0]
+            self.payload = lz4_block_decompress(raw[14:], size)
+        else:
+            self.payload = raw[10:]
+
+    def to_bytes(self, compress=True):
+        flags = self.flags & ~0xC0
+        if compress:
+            body = struct.pack("<I", len(self.payload)) + lz4_block_compress_runs(self.payload)
+            flags |= 0x40
+        else:
+            body = self.payload
+        return (b"XNB" + self.platform + bytes([self.version, flags]) +
+                struct.pack("<I", 10 + len(body)) + body)
+
+    def texture(self):
+        """Texture2D layout: (type_id_end, format, width, height, levels with
+        (offset, size) of each level's data) or None for other content."""
+        data = self.payload
+        count, p = _read_7bit(data, 0)
+        readers = []
+        for _ in range(count):
+            n, p = _read_7bit(data, p)
+            readers.append(data[p:p + n].decode("utf-8", "replace"))
+            p += n + 4
+        _shared, p = _read_7bit(data, p)
+        type_id, p = _read_7bit(data, p)
+        if not 0 < type_id <= len(readers) or "Texture2DReader" not in readers[type_id - 1]:
+            return None
+        fmt, width, height, levels = struct.unpack_from("<iIII", data, p)
+        q = p + 16
+        level_data = []
+        for _ in range(levels):
+            size = struct.unpack_from("<I", data, q)[0]
+            level_data.append((q + 4, size))
+            q += 4 + size
+        return {"header_end": p, "format": fmt, "width": width, "height": height,
+                "levels": level_data, "end": q}
+
+
+def _channel_table(fn):
+    return bytes(bytearray(fn(v) & 0xFF for v in range(256)))
+
+
+_R5_HI = _channel_table(lambda v: ((v * 31 + 127) // 255) << 2)          # bits 2-6 of high byte
+_G5_HI = _channel_table(lambda v: ((v * 31 + 127) // 255) >> 3)          # bits 0-1 of high byte
+_G5_LO = _channel_table(lambda v: (((v * 31 + 127) // 255) & 7) << 5)    # bits 5-7 of low byte
+_B5_LO = _channel_table(lambda v: (v * 31 + 127) // 255)                 # bits 0-4 of low byte
+_A1_HI = _channel_table(lambda v: 0x80 if v >= 128 else 0)
+_HI4 = _channel_table(lambda v: ((v * 15 + 127) // 255) << 4)
+_LO4 = _channel_table(lambda v: (v * 15 + 127) // 255)
+
+
+def _or_bytes(*parts):
+    acc = 0
+    for part in parts:
+        acc |= int.from_bytes(part, "little")
+    return acc.to_bytes(len(parts[0]), "little")
+
+
+def _interleave(lo, hi):
+    out = bytearray(len(lo) * 2)
+    out[0::2] = lo
+    out[1::2] = hi
+    return bytes(out)
+
+
+def rgba_alpha_is_binary(rgba):
+    return not rgba[3::4].translate(None, b"\x00\xff")
+
+
+def rgba_to_bgra5551(rgba):
+    """SurfaceFormat.Color (R,G,B,A bytes) -> XNA Bgra5551 (A<<15|R<<10|G<<5|B, LE)."""
+    r, g, b, a = rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4]
+    lo = _or_bytes(g.translate(_G5_LO), b.translate(_B5_LO))
+    hi = _or_bytes(a.translate(_A1_HI), r.translate(_R5_HI), g.translate(_G5_HI))
+    return _interleave(lo, hi)
+
+
+def rgba_to_bgra4444(rgba):
+    """SurfaceFormat.Color -> XNA Bgra4444 (A<<12|R<<8|G<<4|B, LE)."""
+    r, g, b, a = rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4]
+    lo = _or_bytes(g.translate(_HI4), b.translate(_LO4))
+    hi = _or_bytes(a.translate(_HI4), r.translate(_LO4))
+    return _interleave(lo, hi)
+
+
+TEXTURE_MODES = ("full", "auto16", "16bit")
+
+
+def convert_texture_xnb(xnb, mode):
+    """Rewrite a Color texture to a 16-bit format. auto16: only textures whose
+    alpha is 0 or 255 everywhere, to Bgra5551 (alpha stays exact). 16bit:
+    additionally everything else to Bgra4444. Returns a description or None."""
+    tex = xnb.texture()
+    if tex is None or tex["format"] != 0 or mode == "full":
+        return None
+    data = xnb.payload
+    levels = [data[off:off + size] for off, size in tex["levels"]]
+    if all(rgba_alpha_is_binary(level) for level in levels):
+        fmt, convert, name = 2, rgba_to_bgra5551, "Bgra5551"
+    elif mode == "16bit":
+        fmt, convert, name = 3, rgba_to_bgra4444, "Bgra4444"
+    else:
+        return None
+    parts = [data[:tex["header_end"]],
+             struct.pack("<iIII", fmt, tex["width"], tex["height"], len(levels))]
+    for level in levels:
+        new = convert(level)
+        parts.append(struct.pack("<I", len(new)))
+        parts.append(new)
+    parts.append(data[tex["end"]:])
+    xnb.payload = b"".join(parts)
+    return "%dx%d Color -> %s" % (tex["width"], tex["height"], name)
+
+
 def _read_7bit(data, p):
     value = shift = 0
     while True:
@@ -1520,9 +1737,10 @@ def image_size(path):
     return None
 
 
-def survey_textures(root, top=20):
+def survey_textures(root, top=20, alpha=False):
     root = os.path.abspath(root)
     images = []
+    projected = {"auto16": 0, "16bit": 0, "binary_alpha": 0, "soft_alpha": 0}
     other = {}
     problems = {}
     for path in _walk(root):
@@ -1551,6 +1769,27 @@ def survey_textures(root, top=20):
                 if fmt in COMPRESSED_FORMATS:
                     name += " (compressed)"
                 images.append((gpu, w, h, name, rel, size))
+                if fmt == 0:
+                    binary = None
+                    if alpha:
+                        try:
+                            xnb = XnbFile(path)
+                            tex = xnb.texture()
+                            binary = all(rgba_alpha_is_binary(xnb.payload[o:o + n]) for o, n in tex["levels"])
+                        except (ValueError, IndexError, struct.error):
+                            binary = None
+                    if binary is True:
+                        projected["binary_alpha"] += 1
+                        projected["auto16"] += gpu // 2
+                        projected["16bit"] += gpu // 2
+                    else:
+                        if binary is False:
+                            projected["soft_alpha"] += 1
+                        projected["auto16"] += gpu
+                        projected["16bit"] += gpu // 2
+                else:
+                    projected["auto16"] += gpu
+                    projected["16bit"] += gpu
                 continue
             problems[info] = problems.get(info, 0) + 1
             kind = "xnb: " + info.split(" (")[0]
@@ -1577,6 +1816,7 @@ def survey_textures(root, top=20):
         "by_dir": _sum_by_dir(images),
         "formats": _count_by(images, 3),
         "other": other,
+        "projected": projected if alpha else None,
     }
 
 
@@ -1610,6 +1850,12 @@ def print_textures(r, out=sys.stdout):
     w("\nFormats:\n")
     for fmt, n in sorted(r["formats"].items(), key=lambda kv: -kv[1]):
         w("  %-36s %6d\n" % (fmt, n))
+    p = r.get("projected")
+    if p:
+        w("\nAlpha: %d Color textures with binary alpha (0/255 only), %d with soft alpha\n" % (
+            p["binary_alpha"], p["soft_alpha"]))
+        w("Texture memory with --textures auto16: %s, with --textures 16bit: %s\n" % (
+            human(p["auto16"]), human(p["16bit"])))
     w("\nLargest images (decoded size, dimensions, file):\n")
     for gpu, width, height, fmt, rel, _size in r["largest"]:
         w("  %10s  %5dx%-5d  %s\n" % (human(gpu), width, height, rel))
@@ -1630,8 +1876,9 @@ class PrepareError(Exception):
 
 class Preparer(object):
     def __init__(self, gamedir, framework_dir=None, log=print, dry_run=False, native_dirs=(),
-                 native_arch="aarch64"):
+                 native_arch="aarch64", textures="full"):
         self.root = os.path.abspath(gamedir)
+        self.textures = textures
         self.native_dirs = [d for d in native_dirs if d and os.path.isdir(d)]
         self.native_arch = native_arch
         self.state_dir = os.path.join(self.root, STATE_DIR)
@@ -1744,6 +1991,7 @@ class Preparer(object):
             env = self._prepare_mono(report, main)
         self._retarget_assemblies(report)
         self._install_replacements()
+        self._convert_textures()
 
         engine = report["engine"] or {}
         env.update({
@@ -1753,11 +2001,13 @@ class Preparer(object):
             "YP_FMOD_VERSION": report["fmod_header_version"] or "",
             "YP_NATIVE_NEEDS": " ".join(sorted(report["native_needs"])),
             "YP_PREPARED_BY": "ypport %s" % VERSION,
+            "YP_TEXTURES": self.textures,
         })
         lines = ["# generated by ypport.py prepare - do not edit"]
         for k in sorted(env):
             lines.append("%s=%s" % (k, shquote(str(env[k]))))
         self.state["main"] = main
+        self.state["textures"] = self.textures
         self.state["fingerprint"] = fingerprint(self.root, self.state)
         self._write_state_file("launch.env", "\n".join(lines) + "\n")
         self._write_state_file("inspect.json", json.dumps(report, indent=1, default=_json_default))
@@ -1907,6 +2157,41 @@ class Preparer(object):
             if load_assembly(new, rel) is None:
                 raise PrepareError("retargeting %s produced an unreadable image" % rel)
             self._rewrite_bytes(rel, new, what)
+
+    def _convert_textures(self):
+        """Store Color textures in 16-bit formats to halve their GPU memory:
+        on a 1 GB device the game's texture atlases alone need ~750 MB."""
+        if self.textures == "full":
+            return
+        self.log("Converting textures (%s) ..." % self.textures)
+        saved = 0
+        converted = 0
+        t0 = time.time()
+        for path in _walk(self.root):
+            if not path.lower().endswith(".xnb"):
+                continue
+            rel = _rel(self.root, path)
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(6)
+                if len(head) < 6 or head[:3] != b"XNB" or head[5] & 0x80:
+                    continue
+                xnb = XnbFile(path)
+                tex = xnb.texture()
+                if tex is None or tex["format"] != 0:
+                    continue
+                what = convert_texture_xnb(xnb, self.textures)
+            except (ValueError, IndexError, struct.error) as e:
+                self.log("  skip %s (%s)" % (rel, e))
+                continue
+            if what is None:
+                self.log("  keep  %-55s (soft alpha, stays Color)" % rel)
+                continue
+            self._rewrite_bytes(rel, xnb.to_bytes(compress=True), what)
+            saved += sum(size for _off, size in tex["levels"]) // 2
+            converted += 1
+        self.log("  %d textures converted, %s less texture memory (%.0fs)" % (
+            converted, human(saved), time.time() - t0))
 
     def _rewrite_bytes(self, rel, data, what):
         path = self._abs(rel)
@@ -2083,11 +2368,12 @@ def reset(gamedir, log=print):
 STATUS_OK, STATUS_NOT_PREPARED, STATUS_OUTDATED = 0, 1, 2
 
 
-def prepared_status(gamedir):
+def prepared_status(gamedir, textures=None):
     """STATUS_OK: prepared by this version and unchanged since.
-    STATUS_OUTDATED: prepared by another version of this tool; `restore`
-    and prepare again. STATUS_NOT_PREPARED: never prepared, or the game files
-    were copied again since (use `reset`)."""
+    STATUS_OUTDATED: prepared by another version of this tool, or with
+    another texture mode than `textures`; `restore` and prepare again.
+    STATUS_NOT_PREPARED: never prepared, or the game files were copied again
+    since (use `reset`)."""
     root = os.path.abspath(gamedir)
     try:
         state = _load_state(root)
@@ -2095,7 +2381,11 @@ def prepared_status(gamedir):
             return STATUS_NOT_PREPARED
     except (ValueError, KeyError, OSError, IOError):
         return STATUS_NOT_PREPARED
-    return STATUS_OK if state.get("version") == VERSION else STATUS_OUTDATED
+    if state.get("version") != VERSION:
+        return STATUS_OUTDATED
+    if textures is not None and state.get("textures", "full") != textures:
+        return STATUS_OUTDATED
+    return STATUS_OK
 
 
 def is_prepared(gamedir):
@@ -2118,7 +2408,15 @@ def main(argv=None):
     p = sub.add_parser("textures", help="how much memory the game's images need once decoded")
     p.add_argument("dir")
     p.add_argument("--top", type=int, default=20, help="list this many of the largest images")
+    p.add_argument("--alpha", action="store_true",
+                   help="decode textures to check their alpha and project 16-bit memory use")
     p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("xnb-convert", help="convert one Color texture XNB to a 16-bit format")
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.add_argument("--mode", choices=TEXTURE_MODES[1:], default="auto16")
+    p.add_argument("--no-compress", action="store_true")
 
     p = sub.add_parser("extract", help="extract a .NET single-file bundle")
     p.add_argument("bundle")
@@ -2135,6 +2433,9 @@ def main(argv=None):
                         "(repeatable, first match wins)")
     p.add_argument("--native-arch", default="aarch64",
                    help="architecture of the --native-dir libraries (tests on a PC use x86_64)")
+    p.add_argument("--textures", choices=TEXTURE_MODES, default="full",
+                   help="auto16: Color textures with binary alpha -> Bgra5551; 16bit: also the "
+                        "rest -> Bgra4444; full: leave textures alone")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true", help="restore first if already prepared")
 
@@ -2145,8 +2446,9 @@ def main(argv=None):
     p.add_argument("dir")
 
     p = sub.add_parser("status", help="exit 0 if prepared and unchanged, 2 if prepared by another "
-                                      "version of this tool, 1 otherwise")
+                                      "version of this tool or texture mode, 1 otherwise")
     p.add_argument("dir")
+    p.add_argument("--textures", choices=TEXTURE_MODES)
 
     args = ap.parse_args(argv)
     if args.cmd == "inspect":
@@ -2158,12 +2460,19 @@ def main(argv=None):
             print_report(r)
         return 0 if r["portable"] else 2
     if args.cmd == "textures":
-        r = survey_textures(args.dir, top=args.top)
+        r = survey_textures(args.dir, top=args.top, alpha=args.alpha)
         if args.json:
             json.dump(r, sys.stdout, indent=1, default=_json_default)
             sys.stdout.write("\n")
         else:
             print_textures(r)
+        return 0
+    if args.cmd == "xnb-convert":
+        xnb = XnbFile(args.src)
+        what = convert_texture_xnb(xnb, args.mode)
+        with open(args.dst, "wb") as f:
+            f.write(xnb.to_bytes(compress=not args.no_compress))
+        print(what or "unchanged (not a Color texture, or alpha not binary in auto16 mode)")
         return 0
     if args.cmd == "extract":
         b = Bundle(args.bundle)
@@ -2183,7 +2492,8 @@ def main(argv=None):
         t0 = time.time()
         try:
             Preparer(args.dir, framework_dir=args.framework_dir, dry_run=args.dry_run,
-                     native_dirs=args.native_dir, native_arch=args.native_arch).run(app_name=args.app)
+                     native_dirs=args.native_dir, native_arch=args.native_arch,
+                     textures=args.textures).run(app_name=args.app)
         except (PrepareError, BundleError) as e:
             print("ERROR: %s" % e)
             return 3
@@ -2200,7 +2510,7 @@ def main(argv=None):
         reset(args.dir)
         return 0
     if args.cmd == "status":
-        return prepared_status(args.dir)
+        return prepared_status(args.dir, textures=args.textures)
     ap.print_help()
     return 1
 

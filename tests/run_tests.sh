@@ -258,6 +258,52 @@ else
   bad "assembling the runtime from NuGet"
 fi
 
+# --- 16-bit textures: converted at prepare time, loaded and drawn by MonoGame ----
+echo "== texture conversion"
+ref="$WORK/out/sc-net8-tex"
+if [ ! -d "$ref" ]; then
+  cp -a "$WORK/out/sc-net8" "$ref"
+  python3 "$HERE/texture_check.py" make "$ref/Content"
+fi
+render() { # dir name -> dump file
+  (cd "$1" && timeout 120 xvfb-run -a -s "-screen 0 640x480x24" "$DOTNET" TestGame.dll \
+     --texture-test "$2" "$1/$2.rgba") > "$1/$2.render.log" 2>&1
+}
+for mode in auto16 16bit; do
+  dir="$WORK/run/tex-$mode"; rm -rf "$dir"; cp -a "$ref" "$dir"
+  python3 "$YPPORT" prepare "$dir" "${PREP_ARGS[@]}" --textures "$mode" > "$WORK/run/tex-$mode.log" 2>&1 \
+    || { bad "prepare --textures $mode"; continue; }
+  if [ $mode = auto16 ]; then
+    grep -q "patch Content/binary.xnb .*Bgra5551" "$WORK/run/tex-$mode.log" &&
+      grep -q "patch Content/binary_lz4.xnb .*Bgra5551" "$WORK/run/tex-$mode.log" &&
+      grep -q "keep  Content/soft.xnb" "$WORK/run/tex-$mode.log" \
+      && ok "auto16: binary-alpha textures -> Bgra5551, soft alpha kept" || bad "auto16 decisions"
+    expect="binary:5551 binary_lz4:5551 soft:color"
+  else
+    grep -q "patch Content/soft.xnb .*Bgra4444" "$WORK/run/tex-$mode.log" \
+      && ok "16bit: soft-alpha texture -> Bgra4444" || bad "16bit decisions"
+    expect="binary:5551 soft:4444"
+  fi
+  if command -v xvfb-run > /dev/null; then
+    for item in $expect; do
+      name="${item%%:*}"; fmt="${item##*:}"
+      render "$dir" "$name"
+      python3 "$HERE/texture_check.py" check "$name" "$dir/$name.rgba" "$fmt" > /dev/null 2>&1 \
+        && ok "$mode: $name drawn by MonoGame as $fmt" \
+        || { bad "$mode: $name render"; tail -3 "$dir/$name.render.log"; }
+      rm -f "$dir/$name.rgba" "$dir/$name.render.log"
+    done
+  else
+    echo "  SKIP: rendering checks need xvfb-run"
+  fi
+  python3 "$YPPORT" status "$dir" --textures "$mode" && ok "$mode: status ok for the same mode" \
+    || bad "$mode: status"
+  python3 "$YPPORT" status "$dir" --textures full; st=$?
+  [ $st -eq 2 ] && ok "$mode: another texture mode means outdated" || bad "$mode: mode change status ($st)"
+  python3 "$YPPORT" restore "$dir" > /dev/null && diff -r "$ref" "$dir" > /dev/null \
+    && ok "$mode: restore is byte-identical" || bad "$mode: restore differs"
+done
+
 # --- memory watchdog: kills the game before the device runs out of memory -------
 echo "== memory watchdog"
 sleep 30 & victim=$!

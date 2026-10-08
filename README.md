@@ -28,6 +28,7 @@ therefore CIL bytecode, which is CPU independent. What ties the PC release to x8
 | Bundled .NET runtime (`libcoreclr.so`, `System.Private.CoreLib.dll`, ...) | sets it aside; the port ships Microsoft's aarch64 .NET 8 runtime instead |
 | `runtimeconfig.json` / `deps.json` describing a self-contained x86_64 app | rewrites them for a framework-dependent app with roll-forward |
 | IL assemblies stamped `Machine=AMD64` by `publish -r linux-x64` (the aarch64 runtime refuses them) | rewrites the Machine field; ReadyToRun images are turned back into plain IL |
+| 747 MB of RGBA texture atlases vs. 1 GB of RAM (not packaging, but the next wall) | zram, a memory watchdog, and 16-bit atlases where transparency allows |
 | `libSDL2`, `libopenal` | uses aarch64 builds (system SDL2, bundled OpenAL Soft) |
 | `libfmod` (FMOD Core) | bundles aarch64 FMOD 2.02.18 (user-replaceable) |
 | `libtheorafile` (cutscene video) | builds FNA's Theorafile for aarch64 |
@@ -79,8 +80,11 @@ To see how much memory the game's images need once decoded (the main question on
 device):
 
 ```
-python3 port/yuppiepsycho/tools/ypport.py textures "/path/to/Yuppie Psycho"
+python3 port/yuppiepsycho/tools/ypport.py textures --alpha "/path/to/Yuppie Psycho"
 ```
+
+For Yuppie Psycho this is 62 atlases, 747.6 MB decoded; on 1 GB devices the setup stores the
+ones with all-or-nothing transparency as 16-bit (see port/README.md, "Memory").
 
 ## Step 2: build the package
 
@@ -139,10 +143,10 @@ the setup refuses a build). Per-user settings go into `ports/yuppiepsycho/settin
 | Test | What it proves | Needs |
 |--|--|--|
 | `python3 -m unittest discover -s tests -p 'test_*.py'` | bundle parser (incl. path-traversal and range checks), deps.json/dllmap rewriting | Python 3 |
-| `tests/run_tests.sh` | publishes a MonoGame + FMOD wrapper + Steamworks.NET + Theorafile-binding stand-in game in seven packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, **self-contained .NET 8 with shipped x86_64 libraries like Yuppie Psycho**, NativeAOT), then inspect -> prepare -> **run on .NET 8** (incl. decoding a Theora video through the C# binding) -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes; update detection; game folder copied as a whole; the runtime assembled from NuGet packages (linux-x64 counterpart of the bundled linux-arm64 one) runs the game; the device scenario **mirrored**: linux-arm64 builds (aarch64 runtime and libraries, ARM64-stamped and ReadyToRun assemblies) prepared for and run on x86_64; upgrade of a folder prepared by release 0.1.0 | .NET 8 SDK, zig, ffmpeg |
+| `tests/run_tests.sh` | publishes a MonoGame + FMOD wrapper + Steamworks.NET + Theorafile-binding stand-in game in seven packagings (compressed single-file, net8 single-file, self-contained ReadyToRun, framework-dependent, Windows single-file, **self-contained .NET 8 with shipped x86_64 libraries like Yuppie Psycho**, NativeAOT), then inspect -> prepare -> **run on .NET 8** (incl. decoding a Theora video through the C# binding) -> status -> restore (byte-identical) for each; NativeAOT must be refused; Steam stub in both modes; update detection; game folder copied as a whole; the runtime assembled from NuGet packages (linux-x64 counterpart of the bundled linux-arm64 one) runs the game; the device scenario **mirrored**: linux-arm64 builds (aarch64 runtime and libraries, ARM64-stamped and ReadyToRun assemblies) prepared for and run on x86_64; upgrade of a folder prepared by release 0.1.0; 16-bit texture conversion with every converted texture loaded by MonoGame's ContentManager and drawn under Xvfb, pixel-compared | .NET 8 SDK, zig, ffmpeg, Xvfb |
 | `tests/launcher_sim.sh` | runs the real `YuppiePsycho.sh` on x86_64 inside a fake PortMaster install: first-launch setup with library replacement, second launch without setup, Steam stub, video | .NET 8 SDK |
 
-Current result: 92/92 end-to-end checks and 14/14 unit tests pass.
+Current result: 105/105 end-to-end checks and 14/14 unit tests pass.
 
 What the tests cannot cover is listed in [docs/TECHNICAL.md](docs/TECHNICAL.md#open-questions):
 rendering on the Mali-G31 GPU, memory on a 1 GB device, video decoding speed and the 640x480

@@ -46,6 +46,9 @@ YP_SWAP_FILE=/storage/yuppiepsycho.swap
 YP_MEMWATCH_MIN_MB=64
 # Optional hard cap for the .NET heap in MB (the game then fails with OutOfMemory instead)
 YP_GC_HEAP_LIMIT_MB=
+# Texture atlases: full = as shipped, auto16 = 16-bit where alpha is binary (default on
+# 1 GB devices), 16bit = all 16-bit. Changing it re-runs the setup on the next launch.
+YP_TEXTURES=auto16
 ```
 
 ### Memory
@@ -56,6 +59,11 @@ GPU, half of the game's PC minimum. The launcher therefore sets up 1 GB of compr
 device runs out of memory, because an exhausted 1 GB device freezes instead of recovering. The
 watchdog writes `ports/yuppiepsycho/memlog.txt` (available RAM, free swap, GPU/shmem, game memory,
 twice a second).
+
+The game's 62 texture atlases need about 750 MB once decoded. On 1 GB devices the setup stores
+the atlases whose transparency is all-or-nothing (typical for pixel art) as 16-bit Bgra5551:
+half the memory, transparency exact, colours rounded to 5 bits per channel. Atlases with soft
+transparency (glows, light) stay in full quality unless `YP_TEXTURES=16bit`.
 
 The bundled aarch64 FMOD is 2.02.18, which accepts the game's 2.02 headers. If a future game
 update moves to another FMOD version and there is no sound, download the *FMOD Engine* for Linux

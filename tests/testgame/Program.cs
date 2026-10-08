@@ -47,6 +47,14 @@ namespace TestGame
                 Console.WriteLine("steam init: " + e.GetType().Name);
             }
 
+            int tt = Array.IndexOf(args, "--texture-test");
+            if (tt >= 0 && tt + 2 < args.Length)
+            {
+                using (var g = new TextureTestGame(args[tt + 1], args[tt + 2]))
+                    g.Run();
+                return 0;
+            }
+
             string video = Environment.GetEnvironmentVariable("YP_TEST_VIDEO");
             if (!string.IsNullOrEmpty(video))
                 Console.WriteLine(Theorafile.TF.Decode(video));
@@ -59,6 +67,43 @@ namespace TestGame
             using (var game = new TestGame())
                 game.Run();
             return 0;
+        }
+    }
+
+    // Loads Content/<name>.xnb through the ContentManager, draws it 1:1 into a
+    // render target and dumps the RGBA pixels, to check converted textures
+    // the way the game would see them.
+    public class TextureTestGame : Game
+    {
+        private readonly string _name;
+        private readonly string _dump;
+
+        public TextureTestGame(string name, string dump)
+        {
+            new GraphicsDeviceManager(this);
+            Content.RootDirectory = "Content";
+            _name = name;
+            _dump = dump;
+        }
+
+        protected override void LoadContent()
+        {
+            var tex = Content.Load<Microsoft.Xna.Framework.Graphics.Texture2D>(_name);
+            var rt = new Microsoft.Xna.Framework.Graphics.RenderTarget2D(GraphicsDevice, tex.Width, tex.Height, false,
+                Microsoft.Xna.Framework.Graphics.SurfaceFormat.Color, Microsoft.Xna.Framework.Graphics.DepthFormat.None);
+            GraphicsDevice.SetRenderTarget(rt);
+            GraphicsDevice.Clear(Color.Transparent);
+            var batch = new Microsoft.Xna.Framework.Graphics.SpriteBatch(GraphicsDevice);
+            batch.Begin(Microsoft.Xna.Framework.Graphics.SpriteSortMode.Immediate,
+                Microsoft.Xna.Framework.Graphics.BlendState.Opaque, Microsoft.Xna.Framework.Graphics.SamplerState.PointClamp);
+            batch.Draw(tex, Vector2.Zero, Color.White);
+            batch.End();
+            GraphicsDevice.SetRenderTarget(null);
+            var pixels = new byte[tex.Width * tex.Height * 4];
+            rt.GetData(pixels);
+            File.WriteAllBytes(_dump, pixels);
+            Console.WriteLine("texture-test: " + _name + " " + tex.Width + "x" + tex.Height + " " + tex.Format);
+            Exit();
         }
     }
 

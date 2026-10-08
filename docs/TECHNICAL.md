@@ -44,7 +44,8 @@ gamedata/ (as copied from Steam)
    |    6. retarget CPU-stamped IL assemblies (Machine field, ReadyToRun) to aarch64
    |    7. install aarch64 replacements where x86_64 libraries were parked
    |       (libfmod.so, libopenal.so, libsteam_api.so, libtheorafile.so, ...)
-   |    8. write .ypport/launch.env for the launcher
+   |    8. optionally store Color texture atlases as 16-bit (--textures)
+   |    9. write .ypport/launch.env for the launcher
    v
 gamedata/ runnable with `dotnet <game>.dll` on aarch64
 ```
@@ -202,11 +203,25 @@ What the launcher does about it:
   decoded images land) instead of growing; `MALLOC_ARENA_MAX=2` limits native heap arenas.
   `YP_GC_HEAP_LIMIT_MB` adds an optional hard cap.
 
-`memlog.txt` (shmem column = GPU buffers) and `ypport.py textures` (how much memory the game's
-images need once decoded, run on a PC) decide what comes next. If the decoded textures alone
-approach the free RAM, the options are reducing them at load time (half resolution or 16-bit
-formats for large images on a 640x480 screen) by hooking MonoGame's texture creation, or loading
-on demand where the game preloads.
+`ypport.py textures` on the real game: **62 texture atlases, 2048x2048 or smaller, all
+`SurfaceFormat.Color`, 747.6 MB decoded** (50 MB on disk: LZ4-compressed XNB, mostly transparent
+space). That alone exceeds what a 1 GB device can give the GPU if the game holds all of them.
+
+**16-bit atlases.** `prepare --textures auto16` (the launcher's default below 1.8 GB of RAM)
+rewrites every Color texture XNB whose alpha is only ever 0 or 255 as `Bgra5551`, which
+MonoGame's `Texture2DReader` loads natively: half the memory, alpha exact, RGB rounded to 5 bits.
+Textures with soft alpha stay Color (`--textures 16bit` turns those into `Bgra4444` too). The XNB
+is decoded and re-encoded in pure Python: LZ4 block decoding with slice copies, channel packing
+with `bytes.translate`, big-integer OR and slice interleaving, and an LZ4 encoder that only
+emits runs (offset-1 matches), which is enough for transparent texture space - about 0.4 s per
+2048x2048 atlas on a PC and roughly 1 MB per converted file. The codec is checked against the
+reference `lz4` library in both directions, and the tests load converted XNBs through MonoGame's
+`ContentManager`, draw them 1:1 into a render target under Xvfb (Mesa) and compare every pixel
+with the expected quantised values. `ypport.py textures --alpha` projects the memory per mode.
+
+If the atlases still do not fit, the next steps are half-resolution GL textures that keep their
+logical size (so the game's source rectangles stay valid), which needs a hook into MonoGame's
+texture upload, or evicting atlases the current scene does not use.
 
 ## If the build is NativeAOT
 
