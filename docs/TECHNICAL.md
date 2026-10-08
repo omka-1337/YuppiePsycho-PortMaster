@@ -277,7 +277,8 @@ These need the real game and the device:
 1. ~~Run `inspect` on the real Steam Linux build~~ (done: .NET 8 self-contained, MonoGame 3.8.3
    DesktopGL + Theorafile, FMOD Core 2.02, Steamworks.NET 20.1).
 2. ~~First boot on ROCKNIX / RG40XX H~~: setup and runtime work; `game.dll` needed retargeting
-   (done); content loading runs out of memory - see "Memory on 1 GB devices".
+   (done); content loading ran out of memory until the atlases were stored as 16-bit (done) -
+   the game now runs, and runs well.
 3. Video playback, resolution/scaling, controls.
 4. Performance: ReadyToRun precompilation, GC settings, swap.
 5. Screenshot/cover, test on other firmwares (muOS, Knulli, ArkOS), submit to PortMaster-New.

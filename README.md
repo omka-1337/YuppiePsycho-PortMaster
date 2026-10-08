@@ -4,16 +4,12 @@ A **native** aarch64 port of *Yuppie Psycho: Executive Edition* for Linux handhe
 [PortMaster](https://portmaster.games) (developed on an Anbernic RG40XX H with ROCKNIX). No x86
 emulation: the game's own code runs on an aarch64 .NET runtime.
 
-> **Status: experimental.** The inspector has been run on the real Steam Linux build: it is a
-> self-contained **.NET 8** MonoGame 3.8.3 DesktopGL app with IL game code (no NativeAOT), FMOD
-> Core 2.02, Theorafile video and Steamworks.NET 20.1, which the port covers. On the RG40XX H
-> (ROCKNIX, Mesa OpenGL 3.1) the setup runs, the bundled runtime starts and, after retargeting
-> the x86_64-stamped `game.dll` (see [docs/TECHNICAL.md](docs/TECHNICAL.md#cpu-stamped-il-assemblies)),
-> the game starts loading its content - and runs out of the device's 1 GB of RAM. The launcher
-> now sets up zram, watches memory and stops the game before the device freezes; see
-> [docs/TECHNICAL.md](docs/TECHNICAL.md#memory-on-1-gb-devices). Every piece is tested
-> against real .NET SDK output and a MonoGame stand-in game with the same shape (see
-> [Testing](#testing)).
+> **Status: runs on the Anbernic RG40XX H (ROCKNIX)** - natively, with the bundled .NET 8
+> runtime, 16-bit texture atlases and zram. The way there: retargeting the x86_64-stamped
+> `game.dll` (see [docs/TECHNICAL.md](docs/TECHNICAL.md#cpu-stamped-il-assemblies)), then fitting
+> 747 MB of texture atlases into 1 GB of RAM (see
+> [docs/TECHNICAL.md](docs/TECHNICAL.md#memory-on-1-gb-devices)). Still marked experimental until
+> it has been played through and tried on other firmwares.
 
 ## Why a native port is possible
 
