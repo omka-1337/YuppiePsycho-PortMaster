@@ -46,9 +46,10 @@ YP_SWAP_FILE=/storage/yuppiepsycho.swap
 YP_MEMWATCH_MIN_MB=64
 # Optional hard cap for the .NET heap in MB (the game then fails with OutOfMemory instead)
 YP_GC_HEAP_LIMIT_MB=
-# Texture atlases: full = as shipped, auto16 = 16-bit where alpha is binary (default on
-# 1 GB devices), 16bit = all 16-bit. Changing it re-runs the setup on the next launch.
-YP_TEXTURES=auto16
+# Texture atlases: full = as shipped, 16bit = all 16-bit (default on 1 GB devices),
+# auto16 = 16-bit only where transparency is all-or-nothing. Changing it re-runs the
+# setup on the next launch.
+YP_TEXTURES=16bit
 ```
 
 ### Memory
@@ -60,10 +61,18 @@ device runs out of memory, because an exhausted 1 GB device freezes instead of r
 watchdog writes `ports/yuppiepsycho/memlog.txt` (available RAM, free swap, GPU/shmem, game memory,
 twice a second).
 
-The game's 62 texture atlases need about 750 MB once decoded. On 1 GB devices the setup stores
-the atlases whose transparency is all-or-nothing (typical for pixel art) as 16-bit Bgra5551:
-half the memory, transparency exact, colours rounded to 5 bits per channel. Atlases with soft
-transparency (glows, light) stay in full quality unless `YP_TEXTURES=16bit`.
+The game's 62 texture atlases need about 750 MB once decoded, more than a 1 GB device can give
+the GPU. On such devices the setup stores them as 16-bit, which halves that to about 375 MB:
+atlases whose transparency is all-or-nothing (or nearly) become Bgra5551 (colours rounded to 5
+bits per channel, transparency kept), the others Bgra4444 (4 bits per channel and 16 levels of
+transparency; smooth gradients can show bands). On devices with 2 GB or more nothing is changed.
+
+To see what an atlas looks like after conversion, on a PC:
+
+```
+python3 tools/ypport.py xnb2png gamedata/content/atlas/hero_0.xnb hero.png
+python3 tools/ypport.py xnb2png gamedata/content/atlas/hero_0.xnb hero-16bit.png --as 16bit
+```
 
 The bundled aarch64 FMOD is 2.02.18, which accepts the game's 2.02 headers. If a future game
 update moves to another FMOD version and there is no sound, download the *FMOD Engine* for Linux

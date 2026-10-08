@@ -1620,6 +1620,64 @@ def rgba_alpha_is_binary(rgba):
     return not rgba[3::4].translate(None, b"\x00\xff")
 
 
+_NEAR_BINARY_ALPHA = bytes(bytearray(range(0, 16))) + bytes(bytearray(range(240, 256)))
+
+
+def alpha_class(rgba):
+    """('binary', 0) when alpha is only 0 or 255; ('near', share) when the
+    other values all lie within 15 of either end (anti-aliasing fringes that
+    1-bit alpha reproduces invisibly); otherwise ('soft', share). share is the
+    fraction of pixels that are neither fully transparent nor opaque."""
+    a = rgba[3::4]
+    rest = a.translate(None, b"\x00\xff")
+    if not rest:
+        return "binary", 0.0
+    share = len(rest) / float(len(a))
+    if not rest.translate(None, _NEAR_BINARY_ALPHA):
+        return "near", share
+    return "soft", share
+
+
+def texture_format_for(classes, mode):
+    """Target SurfaceFormat (2 = Bgra5551, 3 = Bgra4444) or None to keep Color."""
+    if mode == "full":
+        return None
+    if all(c in ("binary", "near") for c in classes):
+        return 2
+    return 3 if mode == "16bit" else None
+
+
+_PREVIEW_5 = _channel_table(lambda v: (((v * 31 + 127) // 255) << 3) | (((v * 31 + 127) // 255) >> 2))
+_PREVIEW_4 = _channel_table(lambda v: ((v * 15 + 127) // 255) * 17)
+_PREVIEW_A1 = _channel_table(lambda v: 255 if v >= 128 else 0)
+
+
+def preview_16bit(rgba, fmt):
+    """What a Color image looks like on the GPU after conversion to fmt."""
+    out = bytearray(rgba)
+    if fmt == 2:
+        for c in range(3):
+            out[c::4] = rgba[c::4].translate(_PREVIEW_5)
+        out[3::4] = rgba[3::4].translate(_PREVIEW_A1)
+    elif fmt == 3:
+        for c in range(4):
+            out[c::4] = rgba[c::4].translate(_PREVIEW_4)
+    return bytes(out)
+
+
+def write_png(path, width, height, rgba):
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    stride = width * 4
+    raw = b"".join(b"\0" + rgba[y * stride:(y + 1) * stride] for y in range(height))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(raw, 6)))
+        f.write(chunk(b"IEND", b""))
+
+
 def rgba_to_bgra5551(rgba):
     """SurfaceFormat.Color (R,G,B,A bytes) -> XNA Bgra5551 (A<<15|R<<10|G<<5|B, LE)."""
     r, g, b, a = rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4]
@@ -1641,19 +1699,19 @@ TEXTURE_MODES = ("full", "auto16", "16bit")
 
 def convert_texture_xnb(xnb, mode):
     """Rewrite a Color texture to a 16-bit format. auto16: only textures whose
-    alpha is 0 or 255 everywhere, to Bgra5551 (alpha stays exact). 16bit:
-    additionally everything else to Bgra4444. Returns a description or None."""
+    alpha is (nearly) 0 or 255 everywhere, to Bgra5551. 16bit: additionally
+    everything else to Bgra4444. Returns a description or None."""
     tex = xnb.texture()
     if tex is None or tex["format"] != 0 or mode == "full":
         return None
     data = xnb.payload
     levels = [data[off:off + size] for off, size in tex["levels"]]
-    if all(rgba_alpha_is_binary(level) for level in levels):
-        fmt, convert, name = 2, rgba_to_bgra5551, "Bgra5551"
-    elif mode == "16bit":
-        fmt, convert, name = 3, rgba_to_bgra4444, "Bgra4444"
-    else:
+    classes = [alpha_class(level) for level in levels]
+    fmt = texture_format_for([c for c, _share in classes], mode)
+    if fmt is None:
         return None
+    convert, name = (rgba_to_bgra5551, "Bgra5551") if fmt == 2 else (rgba_to_bgra4444, "Bgra4444")
+    name += ", alpha %s" % classes[0][0]
     parts = [data[:tex["header_end"]],
              struct.pack("<iIII", fmt, tex["width"], tex["height"], len(levels))]
     for level in levels:
@@ -1740,7 +1798,7 @@ def image_size(path):
 def survey_textures(root, top=20, alpha=False):
     root = os.path.abspath(root)
     images = []
-    projected = {"auto16": 0, "16bit": 0, "binary_alpha": 0, "soft_alpha": 0}
+    projected = {"auto16": 0, "16bit": 0, "binary": 0, "near": 0, "soft": 0, "textures": []}
     other = {}
     problems = {}
     for path in _walk(root):
@@ -1770,23 +1828,20 @@ def survey_textures(root, top=20, alpha=False):
                     name += " (compressed)"
                 images.append((gpu, w, h, name, rel, size))
                 if fmt == 0:
-                    binary = None
+                    cls = None
                     if alpha:
                         try:
                             xnb = XnbFile(path)
                             tex = xnb.texture()
-                            binary = all(rgba_alpha_is_binary(xnb.payload[o:o + n]) for o, n in tex["levels"])
+                            classes = [alpha_class(xnb.payload[o:o + n]) for o, n in tex["levels"]]
+                            cls = classes[0][0] if all(c == classes[0][0] for c, _ in classes) else "soft"
+                            projected["textures"].append((rel, cls, max(sh for _c, sh in classes)))
                         except (ValueError, IndexError, struct.error):
-                            binary = None
-                    if binary is True:
-                        projected["binary_alpha"] += 1
-                        projected["auto16"] += gpu // 2
-                        projected["16bit"] += gpu // 2
-                    else:
-                        if binary is False:
-                            projected["soft_alpha"] += 1
-                        projected["auto16"] += gpu
-                        projected["16bit"] += gpu // 2
+                            cls = None
+                    projected[cls or "unknown"] = projected.get(cls or "unknown", 0) + 1
+                    for mode in ("auto16", "16bit"):
+                        target = texture_format_for([cls or "soft"], mode)
+                        projected[mode] += gpu // 2 if target else gpu
                 else:
                     projected["auto16"] += gpu
                     projected["16bit"] += gpu
@@ -1852,10 +1907,15 @@ def print_textures(r, out=sys.stdout):
         w("  %-36s %6d\n" % (fmt, n))
     p = r.get("projected")
     if p:
-        w("\nAlpha: %d Color textures with binary alpha (0/255 only), %d with soft alpha\n" % (
-            p["binary_alpha"], p["soft_alpha"]))
+        w("\nAlpha of the Color textures: %d binary (0/255), %d nearly binary (only within 15 of"
+          " 0/255), %d soft\n" % (p["binary"], p["near"], p["soft"]))
         w("Texture memory with --textures auto16: %s, with --textures 16bit: %s\n" % (
             human(p["auto16"]), human(p["16bit"])))
+        w("\nPer texture (alpha class, share of semi-transparent pixels, format with 16bit):\n")
+        for rel, cls, share in sorted(p["textures"]):
+            target = texture_format_for([cls], "16bit")
+            w("  %-48s %-7s %6.2f%%  %s\n" % (rel[-48:], cls, share * 100,
+                                             {2: "Bgra5551", 3: "Bgra4444"}.get(target, "Color")))
     w("\nLargest images (decoded size, dimensions, file):\n")
     for gpu, width, height, fmt, rel, _size in r["largest"]:
         w("  %10s  %5dx%-5d  %s\n" % (human(gpu), width, height, rel))
@@ -2412,6 +2472,12 @@ def main(argv=None):
                    help="decode textures to check their alpha and project 16-bit memory use")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("xnb2png", help="save a texture XNB as PNG, optionally as it looks after conversion")
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.add_argument("--as", dest="as_mode", choices=("color", "16bit", "5551", "4444"), default="color",
+                   help="16bit: the format --textures 16bit would choose for this texture")
+
     p = sub.add_parser("xnb-convert", help="convert one Color texture XNB to a 16-bit format")
     p.add_argument("src")
     p.add_argument("dst")
@@ -2466,6 +2532,24 @@ def main(argv=None):
             sys.stdout.write("\n")
         else:
             print_textures(r)
+        return 0
+    if args.cmd == "xnb2png":
+        xnb = XnbFile(args.src)
+        tex = xnb.texture()
+        if tex is None or tex["format"] != 0:
+            print("not a Color texture")
+            return 1
+        off, size = tex["levels"][0]
+        rgba = xnb.payload[off:off + size]
+        cls, share = alpha_class(rgba)
+        fmt = {"color": None, "5551": 2, "4444": 3}.get(args.as_mode)
+        if args.as_mode == "16bit":
+            fmt = texture_format_for([cls], "16bit")
+        if fmt:
+            rgba = preview_16bit(rgba, fmt)
+        write_png(args.dst, tex["width"], tex["height"], rgba)
+        print("%dx%d, alpha %s (%.2f%% semi-transparent), shown as %s" % (
+            tex["width"], tex["height"], cls, share * 100, {2: "Bgra5551", 3: "Bgra4444"}.get(fmt, "Color")))
         return 0
     if args.cmd == "xnb-convert":
         xnb = XnbFile(args.src)

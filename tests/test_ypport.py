@@ -204,6 +204,52 @@ class TextureSurveyTests(unittest.TestCase):
         self.assertEqual(r["other"]["audio"][0], 1)
 
 
+class AlphaAndPreviewTests(unittest.TestCase):
+    @staticmethod
+    def rgba(alphas):
+        return b"".join(bytes((10, 20, 30, a)) for a in alphas)
+
+    def test_alpha_class(self):
+        self.assertEqual(ypport.alpha_class(self.rgba([0, 255, 0, 255])), ("binary", 0.0))
+        cls, share = ypport.alpha_class(self.rgba([0, 255, 3, 250]))
+        self.assertEqual((cls, share), ("near", 0.5))
+        self.assertEqual(ypport.alpha_class(self.rgba([0, 255, 128, 255]))[0], "soft")
+
+    def test_format_policy(self):
+        f = ypport.texture_format_for
+        self.assertIsNone(f(["binary"], "full"))
+        self.assertEqual(f(["near"], "auto16"), 2)
+        self.assertIsNone(f(["soft"], "auto16"))
+        self.assertEqual(f(["soft"], "16bit"), 3)
+        self.assertEqual(f(["binary", "soft"], "16bit"), 3)
+
+    def test_preview_matches_quantisation(self):
+        rgba = bytes(bytearray(range(256))) * 4
+        p4 = ypport.preview_16bit(rgba, 3)
+        self.assertTrue(all(v % 17 == 0 for v in p4))
+        self.assertTrue(all(abs(a - b) <= 8 for a, b in zip(rgba, p4)))
+        p5 = ypport.preview_16bit(rgba, 2)
+        self.assertTrue(all(v in (0, 255) for v in p5[3::4]))
+        self.assertTrue(all(abs(a - b) <= 4 for a, b in zip(rgba[0::4], p5[0::4])))
+
+    def test_write_png(self):
+        w, h = 5, 3
+        rgba = bytes(bytearray(range(w * h * 4)))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            ypport.write_png(path, w, h, rgba)
+            self.assertEqual(ypport.image_size(path), (w, h))
+            data = open(path, "rb").read()
+            i = data.index(b"IDAT")
+            n = struct.unpack(">I", data[i - 4:i])[0]
+            raw = zlib.decompress(data[i + 4:i + 4 + n])
+            rows = [raw[y * (w * 4 + 1) + 1:(y + 1) * (w * 4 + 1)] for y in range(h)]
+            self.assertEqual(b"".join(rows), rgba)
+        finally:
+            os.remove(path)
+
+
 class RewriteTests(unittest.TestCase):
     def test_unpin_dllmaps(self):
         src = ('<configuration>\n'

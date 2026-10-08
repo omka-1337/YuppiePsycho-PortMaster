@@ -207,10 +207,13 @@ What the launcher does about it:
 `SurfaceFormat.Color`, 747.6 MB decoded** (50 MB on disk: LZ4-compressed XNB, mostly transparent
 space). That alone exceeds what a 1 GB device can give the GPU if the game holds all of them.
 
-**16-bit atlases.** `prepare --textures auto16` (the launcher's default below 1.8 GB of RAM)
-rewrites every Color texture XNB whose alpha is only ever 0 or 255 as `Bgra5551`, which
-MonoGame's `Texture2DReader` loads natively: half the memory, alpha exact, RGB rounded to 5 bits.
-Textures with soft alpha stay Color (`--textures 16bit` turns those into `Bgra4444` too). The XNB
+**16-bit atlases.** `prepare --textures 16bit` (the launcher's default below 1.8 GB of RAM)
+rewrites every Color texture XNB in a 16-bit format that MonoGame's `Texture2DReader` loads
+natively: `Bgra5551` when the alpha is only 0/255 or within 15 of either (anti-aliasing
+fringes), `Bgra4444` otherwise. `--textures auto16` converts only the former. On the real game
+`textures --alpha` finds 9 binary and 53 soft-alpha atlases, so `auto16` saves almost nothing
+(727.9 MB) and `16bit` halves the total (373.8 MB). Bgra4444 means 4 bits per channel; whether
+the banding is acceptable is checked with `xnb2png --as 16bit` on the real atlases. The XNB
 is decoded and re-encoded in pure Python: LZ4 block decoding with slice copies, channel packing
 with `bytes.translate`, big-integer OR and slice interleaving, and an LZ4 encoder that only
 emits runs (offset-1 matches), which is enough for transparent texture space - about 0.4 s per

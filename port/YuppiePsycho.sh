@@ -90,11 +90,12 @@ if [ -n "$FMOD_LIBDIR" ] && [ -f "$DATADIR/.ypport/launch.env" ]; then
   fi
 fi
 
-# Texture atlases need ~750 MB decoded; on 1 GB devices store those with binary
-# alpha (most of them) as 16-bit Bgra5551 - half the memory, alpha unchanged.
+# The game's 62 texture atlases need ~750 MB decoded, more than a 1 GB device can
+# give the GPU. There they are stored as 16-bit (half the memory): Bgra5551 where
+# transparency is all-or-nothing, Bgra4444 where it is soft (53 of the 62).
 mem_total_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
 if [ -z "${YP_TEXTURES:-}" ]; then
-  if [ "${mem_total_mb:-0}" -lt 1800 ]; then YP_TEXTURES=auto16; else YP_TEXTURES=full; fi
+  if [ "${mem_total_mb:-0}" -lt 1800 ]; then YP_TEXTURES=16bit; else YP_TEXTURES=full; fi
 fi
 export YP_TEXTURES
 
