@@ -293,5 +293,88 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(ypport.fmod_version_str(0x00020306), "2.03.06")
 
 
+
+def ogg_page(serial, packets, granule=0, bos=False):
+    """One Ogg page holding whole packets (the CRC is left 0: ypport does not
+    check it)."""
+    lacing = bytearray()
+    for pkt in packets:
+        n = len(pkt)
+        lacing += b"\xff" * (n // 255) + bytes([n % 255])
+    return (b"OggS\0" + bytes([2 if bos else 0]) + struct.pack("<qIII", granule, serial, 0, 0) +
+            bytes([len(lacing)]) + bytes(lacing) + b"".join(packets))
+
+
+def theora_ident(width, height, fps=(30, 1), fmt=0, shift=6, vrev=1):
+    fmbw, fmbh = (width + 15) // 16, (height + 15) // 16
+    bits = (48 << 10) | (shift << 5) | (fmt << 3)
+    return (b"\x80theora" + bytes([3, 2, vrev]) + struct.pack(">HH", fmbw, fmbh) +
+            width.to_bytes(3, "big") + height.to_bytes(3, "big") + bytes([0, 0]) +
+            struct.pack(">II", *fps) + (1).to_bytes(3, "big") + (1).to_bytes(3, "big") + b"\0" +
+            (0).to_bytes(3, "big") + struct.pack(">H", bits))
+
+
+class VideoTests(unittest.TestCase):
+    def write_ogv(self, path, last_granule, vrev=1):
+        vorbis = b"\x01vorbis" + struct.pack("<IB", 0, 2) + struct.pack("<I", 48000) + b"\0" * 14
+        data = (ogg_page(7, [theora_ident(1920, 1080, vrev=vrev)], bos=True) +
+                ogg_page(9, [vorbis], bos=True) +
+                ogg_page(7, [b"\x81theora", b"\x82theora"]) +
+                ogg_page(7, [b"\0" * 600], granule=last_granule))
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def test_ogg_video_info(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "intro.ogv")
+            # keyframe 64 plus 9 frames: 73 frames (3.2.1 granules count from 1)
+            self.write_ogv(path, (64 << 6) | 9)
+            v = ypport.ogg_video_info(path)
+            self.assertEqual((v["width"], v["height"], v["frame_height"]), (1920, 1080, 1088))
+            self.assertEqual((v["fps"], v["pixel_format"], v["frames"]), (30.0, "420", 73))
+            self.assertAlmostEqual(v["duration"], 73 / 30.0)
+            self.assertEqual(v["audio"], [{"channels": 2, "rate": 48000}])
+            self.write_ogv(path, (64 << 6) | 9, vrev=0)
+            self.assertEqual(ypport.ogg_video_info(path)["frames"], 74)
+            with open(os.path.join(d, "music.ogg"), "wb") as f:
+                f.write(ogg_page(3, [b"\x01vorbis" + b"\0" * 23], bos=True))
+            self.assertIsNone(ypport.ogg_video_info(os.path.join(d, "music.ogg")))
+            self.assertEqual([v["path"] for v in ypport.find_videos(d)], ["intro.ogv"])
+
+    def test_video_fit(self):
+        self.assertEqual(ypport.video_fit(1920, 1080, "640x480"), (640, 360))
+        self.assertEqual(ypport.video_fit(1440, 1080, "640x480"), (640, 480))
+        self.assertEqual(ypport.video_fit(1366, 768, "960x540"), (960, 540))
+        self.assertIsNone(ypport.video_fit(640, 360, "640x480"))
+        self.assertIsNone(ypport.video_fit(680, 384, "640x480"))  # shrinks less than 10%
+        self.assertEqual(ypport.video_mode("854x480"), "854x480")
+        self.assertRaises(Exception, ypport.video_mode, "640")
+
+    def test_xnb_video_info(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import make_video_xnb
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "intro.xnb")
+            with open(path, "wb") as f:
+                f.write(make_video_xnb.video_xnb("Video\\intro.ogv", 1280, 720, 29.97))
+            x = ypport.XnbFile(path)
+            info = ypport.xnb_video_info(x)
+            self.assertEqual((info["filename"], info["width"], info["height"]), ("Video\\intro.ogv", 1280, 720))
+            self.assertAlmostEqual(info["fps"], 29.97, places=4)
+            self.assertEqual(struct.unpack_from("<i", x.payload, info["height_offset"])[0], 720)
+            # compressed the way prepare stores converted XNBs
+            with open(path, "wb") as f:
+                f.write(x.to_bytes(compress=True))
+            self.assertEqual(ypport.xnb_video_info(ypport.XnbFile(path))["width"], 1280)
+
+    def test_tool_output_and_jobs(self):
+        self.assertEqual(ypport.parse_tool_output("a=1\nskip=already fits 640x480\nnoise\n"),
+                         {"a": "1", "skip": "already fits 640x480"})
+        seen = []
+        cmds = [[sys.executable, "-c", "import sys; print('n=%d' % {}); sys.exit({})".format(i, i % 2)]
+                for i in range(5)]
+        ypport.run_jobs(cmds, 2, lambda i, rc, out, err: seen.append((i, rc, out.strip())))
+        self.assertEqual(sorted(seen), [(i, i % 2, "n=%d" % i) for i in range(5)])
+
 if __name__ == "__main__":
     unittest.main()

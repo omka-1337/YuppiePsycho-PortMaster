@@ -7,7 +7,8 @@
 # the original. Needs a .NET 8 SDK on PATH (net6.0 targets are fetched from
 # NuGet) and network access to nuget.org. With zig (pip install ziglang) the
 # Steam stub and Theorafile are built and exercised as well; with ffmpeg a
-# Theora video is generated and decoded through the C# binding.
+# Theora video is generated and decoded through the C# binding, and HD
+# videos are shrunk with ogvshrink.
 #
 # Everything runs on an x86_64 PC, so the device scenario is tested mirrored:
 # builds published for linux-arm64 (aarch64 runtime, aarch64 libraries,
@@ -303,6 +304,56 @@ for mode in auto16 16bit; do
   python3 "$YPPORT" restore "$dir" > /dev/null && diff -r "$ref" "$dir" > /dev/null \
     && ok "$mode: restore is byte-identical" || bad "$mode: restore differs"
 done
+
+# --- cutscenes: HD videos re-encoded to fit the screen, played through Theorafile -
+echo "== video shrinking"
+if [ -n "$VIDEO" ] && THEORAFILE_SRC="$WORK/theorafile-src" LIBTHEORA_SRC="$WORK/libtheora-src" \
+     "$REPO/src/ogvshrink/build.sh" "$WORK/natives" x86_64 aarch64 > "$WORK/ogvshrink.log" 2>&1 &&
+   PROGRAM="$HERE/ogvdupgen.c" THEORAFILE_SRC="$WORK/theorafile-src" LIBTHEORA_SRC="$WORK/libtheora-src" \
+     "$REPO/src/ogvshrink/build.sh" "$WORK/tools" x86_64 >> "$WORK/ogvshrink.log" 2>&1; then
+  ok "ogvshrink built for x86_64 and aarch64"
+  ref="$WORK/out/sc-net8-video"
+  if [ ! -d "$ref" ]; then
+    cp -a "$WORK/out/sc-net8" "$ref"
+    mkdir -p "$ref/Content/video"
+    ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=330 \
+      -t 2 -c:v libtheora -q:v 7 -c:a libvorbis "$ref/Content/video/intro.ogv"
+    python3 "$HERE/make_video_xnb.py" "$ref/Content/video/intro.xnb" intro.ogv 1280 720
+    "$WORK/tools/x86_64/ogvdupgen" "$ref/Content/video/dups.ogv" > "$WORK/dups.frames"
+    cp "$VIDEO" "$ref/Content/video/small.ogv"
+  fi
+  dir="$WORK/run/video"; rm -rf "$dir"; cp -a "$ref" "$dir"
+  log="$WORK/run/video.prepare.log"
+  python3 "$YPPORT" prepare "$dir" "${PREP_ARGS[@]}" --videos 640x480 > "$log" 2>&1 \
+    && ok "prepare --videos 640x480" || bad "prepare --videos (see $log)"
+  grep -q "shrink Content/video/intro.ogv  1280x720 -> 640x360" "$log" &&
+    grep -q "keep  Content/video/small.ogv .*fits 640x480" "$log" &&
+    grep -q "patch Content/video/intro.xnb .*video size 1280x720 -> 640x360" "$log" \
+    && ok "HD video shrunk, small one kept, its XNB updated" || bad "video decisions"
+  python3 "$YPPORT" videos --json "$dir" > "$WORK/run/video.json"
+  python3 - "$WORK/run/video.json" "$(cat "$WORK/dups.frames")" <<'EOF' \
+    && ok "frames, frame rate and audio kept (duplicate frames too)" || bad "video properties"
+import json, sys
+v = {x["path"]: x for x in json.load(open(sys.argv[1]))}
+intro, dups = v["Content/video/intro.ogv"], v["Content/video/dups.ogv"]
+assert (intro["width"], intro["height"], intro["frames"], intro["fps"]) == (640, 360, 60, 30.0), intro
+assert intro["audio"] and intro["audio"][0]["rate"] == 44100, intro
+assert (dups["width"], dups["height"], dups["frames"]) == (640, 360, int(sys.argv[2])), dups
+EOF
+  (cd "$dir" && YP_TEST_VIDEO="$dir/Content/video/intro.ogv" LD_LIBRARY_PATH="$NATIVES" \
+    "$DOTNET" TestGame.dll --smoke) > "$WORK/run/video.smoke.log" 2>&1
+  grep -q "video decoded: 640x360 fmt 0, 6[01] frames" "$WORK/run/video.smoke.log" \
+    && ok "shrunk video plays through the game's Theorafile binding" \
+    || { bad "shrunk video decode"; tail -3 "$WORK/run/video.smoke.log"; }
+  python3 "$YPPORT" status "$dir" --videos 640x480 && ok "status ok for the same video mode" \
+    || bad "video status"
+  python3 "$YPPORT" status "$dir" --videos full; st=$?
+  [ $st -eq 2 ] && ok "another video mode means outdated" || bad "video mode change status ($st)"
+  python3 "$YPPORT" restore "$dir" > /dev/null && diff -r "$ref" "$dir" > /dev/null \
+    && ok "videos: restore is byte-identical" || bad "videos: restore differs"
+else
+  echo "  SKIP: needs ffmpeg and a C compiler (zig), see $WORK/ogvshrink.log"
+fi
 
 # --- memory watchdog: kills the game before the device runs out of memory -------
 echo "== memory watchdog"

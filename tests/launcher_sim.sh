@@ -4,8 +4,8 @@
 #   tests/launcher_sim.sh GAME_BUILD_DIR NATIVES_X86_64_DIR [workdir]
 #
 # GAME_BUILD_DIR is a published tests/testgame (see run_tests.sh, e.g. out/sc-net8),
-# NATIVES_X86_64_DIR holds x86_64 builds of the Steam stub and Theorafile
-# (natives/x86_64 of a run_tests.sh work dir). Set YP_TEST_VIDEO to an .ogv file to
+# NATIVES_X86_64_DIR holds x86_64 builds of the Steam stub, Theorafile and
+# ogvshrink (natives/x86_64 of a run_tests.sh work dir). Set YP_TEST_VIDEO to an .ogv file to
 # have the stand-in game decode it. The host's dotnet
 # stands in for the device runtime via yuppiepsycho/dotnet, and DEVICE_ARCH is
 # x86_64 so the launcher picks libs.x86_64. Everything else - first-run setup,
@@ -25,6 +25,11 @@ cp -a "$REPO/port/yuppiepsycho" "$WORK/root/ports/"
 G="$WORK/root/ports/yuppiepsycho"
 mkdir -p "$G/libs.x86_64" "$G/gamedata"
 cp "$NATIVES"/*.so "$G/libs.x86_64/"
+# The video re-encoder, where build.sh puts the aarch64 one.
+if [ -f "$NATIVES/ogvshrink" ]; then
+  mkdir -p "$G/tools/bin.x86_64"
+  cp "$NATIVES/ogvshrink" "$G/tools/bin.x86_64/"
+fi
 ln -s "$DOTNET_ROOT" "$G/dotnet"
 cp -a "$GAME/." "$G/gamedata/"
 printf 'YP_ARGS="--smoke"\nYP_STEAM_STUB=fake\nexport YP_TEST_VIDEO="%s"\n' "${YP_TEST_VIDEO:-}" > "$G/settings.txt"

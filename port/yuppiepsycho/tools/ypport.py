@@ -17,6 +17,8 @@ Subcommands
                           and native libraries, rewrite runtimeconfig/deps.json
                           and write .ypport/launch.env for the launcher.
   restore GAMEDIR         Undo `prepare`.
+  textures DIR, videos DIR  What the game's images and cutscenes cost on the
+                          device (memory, decoding time).
 
 Only the Python standard library is used, so the same file runs on a PC and
 on the handheld (Python 3.6+).
@@ -26,9 +28,11 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import time
 import zlib
@@ -38,7 +42,7 @@ try:
 except ImportError:  # pragma: no cover
     from pipes import quote as shquote
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 STATE_DIR = ".ypport"
 
 # --------------------------------------------------------------------------
@@ -977,6 +981,7 @@ def inspect_dir(root, skip=()):
         "mono_runtime_files": [],
         "managed": [],
         "content_dirs": [],
+        "videos": [],
         "notes": [],
     }
     managed_sources = []
@@ -996,6 +1001,15 @@ def inspect_dir(root, skip=()):
             top_dirs.add(rel.split("/")[0])
         base = os.path.basename(path)
         lower = base.lower()
+        if lower.endswith(VIDEO_EXTS):
+            try:
+                info = ogg_video_info(path)
+            except (OSError, IOError, struct.error, ValueError):
+                info = None
+            if info is not None:
+                info["path"] = rel
+                report["videos"].append(info)
+            continue
         if lower.endswith(".runtimeconfig.json"):
             report["runtimeconfigs"].append(rel)
             continue
@@ -1383,6 +1397,16 @@ def print_report(r, out=sys.stdout):
         key, _ = classify_native(os.path.basename(n["path"]))
         extra = (" (%d exports)" % n["exports"]) if n.get("exports") else ""
         w("  %-60s %-6s %-8s %s%s\n" % (n["path"][-60:], n["format"], n["arch"], key or "", extra))
+    if r.get("videos"):
+        vids = r["videos"]
+        sizes = {}
+        for v in vids:
+            key = "%dx%d %s" % (v["width"], v["height"], v["pixel_format"])
+            sizes[key] = sizes.get(key, 0) + 1
+        w("\nVideos (Ogg Theora)\n-------------------\n")
+        w("  %d files, %s, %s of video; %s\n" % (
+            len(vids), human(sum(v["size"] for v in vids)), _fmt_duration(sum(v["duration"] or 0 for v in vids)),
+            ", ".join("%s x%d" % kv for kv in sorted(sizes.items()))))
     for note in r["notes"]:
         w("\nnote: %s\n" % note)
     w("\nVerdict\n-------\n")
@@ -1927,6 +1951,234 @@ def print_textures(r, out=sys.stdout):
 
 
 # --------------------------------------------------------------------------
+# Videos (Ogg Theora cutscenes)
+# --------------------------------------------------------------------------
+
+VIDEO_EXTS = (".ogv", ".ogg")
+VIDEO_TOOL = "ogvshrink"
+
+
+def _ogg_pages(data):
+    """Complete Ogg pages in `data`: (header_type, granulepos, serial, lacing, body)."""
+    p = data.find(b"OggS")
+    while 0 <= p and p + 27 <= len(data):
+        if data[p + 4] != 0:
+            p = data.find(b"OggS", p + 1)
+            continue
+        htype = data[p + 5]
+        gp, serial = struct.unpack_from("<qI", data, p + 6)
+        nseg = data[p + 26]
+        body = p + 27 + nseg
+        lacing = data[p + 27:body]
+        end = body + sum(bytearray(lacing))
+        if len(lacing) < nseg or end > len(data):
+            return
+        yield htype, gp, serial, lacing, data[body:end]
+        p = data.find(b"OggS", end)
+
+
+def _first_packet(lacing, body):
+    n = 0
+    for v in bytearray(lacing):
+        n += v
+        if v < 255:
+            break
+    return body[:n]
+
+
+def ogg_video_info(path):
+    """Header facts of an Ogg Theora file (picture size, frame rate, pixel
+    format, frames, audio), or None if it has no Theora stream."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(65536)
+        f.seek(max(0, size - 262144))
+        tail = f.read()
+    if head[:4] != b"OggS":
+        return None
+    theora = None
+    audio = []
+    for htype, _gp, serial, lacing, body in _ogg_pages(head):
+        if not htype & 2:
+            break
+        pkt = _first_packet(lacing, body)
+        if pkt[:7] == b"\x80theora" and len(pkt) >= 42 and theora is None:
+            vrev = pkt[9]
+            fn, fd = struct.unpack_from(">II", pkt, 22)
+            bits = struct.unpack_from(">H", pkt, 40)[0]
+            theora = {
+                "serial": serial,
+                "width": int.from_bytes(pkt[14:17], "big"),
+                "height": int.from_bytes(pkt[17:20], "big"),
+                "frame_width": struct.unpack_from(">H", pkt, 10)[0] * 16,
+                "frame_height": struct.unpack_from(">H", pkt, 12)[0] * 16,
+                "fps": float(fn) / fd if fd else 0.0,
+                "pixel_format": {0: "420", 2: "422", 3: "444"}.get((bits >> 3) & 3, "?"),
+                "bitrate": int.from_bytes(pkt[37:40], "big"),
+                "_shift": (bits >> 5) & 31,
+                "_vrev": vrev,
+            }
+        elif pkt[:7] == b"\x01vorbis" and len(pkt) >= 16:
+            audio.append({"channels": pkt[11], "rate": struct.unpack_from("<I", pkt, 12)[0]})
+    if theora is None:
+        return None
+    last = -1
+    for _htype, gp, serial, _lacing, _body in _ogg_pages(tail):
+        if serial == theora["serial"] and gp > last:
+            last = gp
+    shift = theora.pop("_shift")
+    vrev = theora.pop("_vrev")
+    del theora["serial"]
+    frames = None
+    if last >= 0:
+        iframe = last >> shift
+        frames = iframe + (last - (iframe << shift)) + (1 if vrev == 0 else 0)
+    theora["frames"] = frames
+    theora["duration"] = frames / theora["fps"] if frames is not None and theora["fps"] else None
+    theora["audio"] = audio
+    theora["size"] = size
+    return theora
+
+
+def video_fit(width, height, box):
+    """Size ogvshrink scales a width x height picture to so that it fits
+    box ("WxH"), or None if it already (nearly) does."""
+    bw, bh = (int(v) for v in box.split("x"))
+    scale = min(float(bw) / width, float(bh) / height, 1.0)
+    w = max(16, int(width * scale + 0.5) & ~1)
+    h = max(16, int(height * scale + 0.5) & ~1)
+    if w >= width * 0.9:
+        return None
+    return w, h
+
+
+def find_videos(root):
+    root = os.path.abspath(root)
+    out = []
+    for path in _walk(root):
+        if not path.lower().endswith(VIDEO_EXTS):
+            continue
+        try:
+            info = ogg_video_info(path)
+        except (OSError, IOError, struct.error, ValueError):
+            info = None
+        if info is not None:
+            info["path"] = _rel(root, path)
+            out.append(info)
+    return out
+
+
+def _host_arch():
+    machine = os.uname()[4].lower()
+    return {"arm64": "aarch64", "amd64": "x86_64"}.get(machine, machine)
+
+
+def find_video_tool(arch, dirs=()):
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in list(dirs) + [os.path.join(here, "bin." + arch)]:
+        path = os.path.join(d, VIDEO_TOOL)
+        if os.path.isfile(path) and sniff(path) == ("elf", arch):
+            if not os.access(path, os.X_OK):
+                try:
+                    os.chmod(path, 0o755)
+                except OSError:
+                    pass
+            return path
+    return None
+
+
+def parse_tool_output(text):
+    out = {}
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def run_jobs(commands, jobs, done):
+    """Runs commands (lists) with up to `jobs` at a time; calls
+    done(index, returncode, stdout, stderr) as each one finishes."""
+    pending = list(enumerate(commands))
+    running = []
+    while pending or running:
+        while pending and len(running) < max(1, jobs):
+            i, cmd = pending.pop(0)
+            running.append((i, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)))
+        time.sleep(0.2)
+        for item in list(running):
+            i, proc = item
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                running.remove(item)
+                done(i, proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+
+
+def _fmt_duration(seconds):
+    if seconds is None:
+        return "?"
+    return "%d:%02d" % (int(seconds) // 60, int(seconds) % 60)
+
+
+def print_videos(videos, root, bench=None, out=sys.stdout):
+    w = out.write
+    w("ypport videos - %s\n" % root)
+    w("=" * 72 + "\n")
+    if not videos:
+        w("No Ogg Theora videos found.\n\n")
+        return
+    for v in videos:
+        audio = ", ".join("%dch %d Hz" % (a["channels"], a["rate"]) for a in v["audio"]) or "no audio"
+        w("  %s\n    %dx%d %s, %.3f fps, %s frames (%s), %s, %s\n" % (
+            v["path"], v["width"], v["height"], v["pixel_format"], v["fps"],
+            v["frames"] if v["frames"] is not None else "?", _fmt_duration(v["duration"]),
+            human(v["size"]), audio))
+        b = (bench or {}).get(v["path"])
+        if b:
+            if "src_decode_avg_ms" in b:
+                w("    decode per frame: avg %s ms, p95 %s ms, max %s ms; %s%% of frames take longer"
+                  " than the %.1f ms a frame lasts\n" % (
+                      b["src_decode_avg_ms"], b["src_decode_p95_ms"], b["src_decode_max_ms"],
+                      b["src_slow_frames_pct"], 1000.0 / v["fps"] if v["fps"] else 0))
+            else:
+                w("    benchmark failed: %s\n" % (b.get("skip") or b.get("error") or "?"))
+    total = sum(v["duration"] or 0 for v in videos)
+    w("\n%d videos, %s, %s of video\n\n" % (len(videos), human(sum(v["size"] for v in videos)),
+                                           _fmt_duration(total)))
+
+
+def xnb_video_info(xnb):
+    """Video XNB (VideoReader) fields with the payload offsets of width and
+    height, or None for other content."""
+    data = xnb.payload
+    count, p = _read_7bit(data, 0)
+    readers = []
+    for _ in range(count):
+        n, p = _read_7bit(data, p)
+        readers.append(data[p:p + n].decode("utf-8", "replace"))
+        p += n + 4
+    _shared, p = _read_7bit(data, p)
+    type_id, p = _read_7bit(data, p)
+    if not 0 < type_id <= len(readers) or "VideoReader" not in readers[type_id - 1]:
+        return None
+    # Each field is written with ReadObject<T>: a type reader index, then the value.
+    idx, p = _read_7bit(data, p)
+    name = None
+    if idx:
+        n, p = _read_7bit(data, p)
+        name = data[p:p + n].decode("utf-8", "replace")
+        p += n
+    fields = {"filename": name}
+    for key, fmt in (("duration_ms", "<i"), ("width", "<i"), ("height", "<i"), ("fps", "<f"),
+                     ("soundtrack", "<i")):
+        idx, p = _read_7bit(data, p)
+        fields[key + "_offset"] = p
+        fields[key] = struct.unpack_from(fmt, data, p)[0]
+        p += 4
+    return fields
+
+
+# --------------------------------------------------------------------------
 # prepare / restore
 # --------------------------------------------------------------------------
 
@@ -1936,9 +2188,14 @@ class PrepareError(Exception):
 
 class Preparer(object):
     def __init__(self, gamedir, framework_dir=None, log=print, dry_run=False, native_dirs=(),
-                 native_arch="aarch64", textures="full"):
+                 native_arch="aarch64", textures="full", videos="full", video_tool=None,
+                 video_quality=44, jobs=None):
         self.root = os.path.abspath(gamedir)
         self.textures = textures
+        self.videos = videos
+        self.video_tool = video_tool
+        self.video_quality = video_quality
+        self.jobs = jobs or min(4, os.cpu_count() or 1)
         self.native_dirs = [d for d in native_dirs if d and os.path.isdir(d)]
         self.native_arch = native_arch
         self.state_dir = os.path.join(self.root, STATE_DIR)
@@ -2052,6 +2309,7 @@ class Preparer(object):
         self._retarget_assemblies(report)
         self._install_replacements()
         self._convert_textures()
+        self._shrink_videos()
 
         engine = report["engine"] or {}
         env.update({
@@ -2062,12 +2320,14 @@ class Preparer(object):
             "YP_NATIVE_NEEDS": " ".join(sorted(report["native_needs"])),
             "YP_PREPARED_BY": "ypport %s" % VERSION,
             "YP_TEXTURES": self.textures,
+            "YP_VIDEOS": self.videos,
         })
         lines = ["# generated by ypport.py prepare - do not edit"]
         for k in sorted(env):
             lines.append("%s=%s" % (k, shquote(str(env[k]))))
         self.state["main"] = main
         self.state["textures"] = self.textures
+        self.state["videos"] = self.videos
         self.state["fingerprint"] = fingerprint(self.root, self.state)
         self._write_state_file("launch.env", "\n".join(lines) + "\n")
         self._write_state_file("inspect.json", json.dumps(report, indent=1, default=_json_default))
@@ -2253,6 +2513,132 @@ class Preparer(object):
         self.log("  %d textures converted, %s less texture memory (%.0fs)" % (
             converted, human(saved), time.time() - t0))
 
+    def _shrink_videos(self):
+        """Re-encode cutscenes larger than the screen to fit it: software
+        Theora decoding of HD video is too slow for a Cortex-A53."""
+        if self.videos == "full":
+            return
+        todo = []
+        for v in find_videos(self.root):
+            fit = video_fit(v["width"], v["height"], self.videos)
+            if fit is None:
+                self.log("  keep  %-55s (%dx%d fits %s)" % (v["path"], v["width"], v["height"], self.videos))
+            else:
+                todo.append((v, fit))
+        if not todo:
+            return
+        tool = self.video_tool or find_video_tool(self.native_arch, self.native_dirs)
+        if tool is None:
+            self.log("  cannot shrink %d videos: no %s for %s" % (len(todo), VIDEO_TOOL, self.native_arch))
+            return
+        todo.sort(key=lambda item: -item[0]["size"])
+        seconds = sum(v["duration"] or 0 for v, _fit in todo)
+        self.log("Shrinking %d videos (%s of video) to fit %s, %d at a time ..." % (
+            len(todo), _fmt_duration(seconds), self.videos, self.jobs))
+        if self.dry_run:
+            for v, (w, h) in todo:
+                self.log("  would shrink %s (%dx%d -> %dx%d)" % (v["path"], v["width"], v["height"], w, h))
+            return
+        t0 = time.time()
+        results = {}
+        cmds = []
+        for v, _fit in todo:
+            src = self._abs(v["path"])
+            cmds.append([tool, "--max", self.videos, "--quality", str(self.video_quality),
+                         src, src + ".yptmp.ogv"])
+
+        def done(i, rc, out, err):
+            v = todo[i][0]
+            results[i] = (rc, parse_tool_output(out), err)
+            self._video_done(v, rc, results[i][1], err, len(results), len(todo), time.time() - t0)
+
+        run_jobs(cmds, self.jobs, done)
+        shrunk = dict((todo[i][0]["path"], todo[i][1]) for i, (rc, _o, _e) in results.items() if rc == 0)
+        if shrunk:
+            self._patch_video_xnbs(shrunk, dict((v["path"], v) for v, _fit in todo))
+        self.log("  %d of %d videos shrunk (%.0fs)" % (len(shrunk), len(todo), time.time() - t0))
+
+    def _video_done(self, v, rc, info, err, n, total, elapsed):
+        rel = v["path"]
+        tmp = self._abs(rel) + ".yptmp.ogv"
+        if rc != 0:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            why = info.get("skip") or (err.strip().splitlines() or ["exit status %d" % rc])[-1]
+            self.log("  [%d/%d] keep  %s (%s)" % (n, total, rel, why))
+            return
+        new_size = os.path.getsize(tmp)
+        budget = 1000.0 / v["fps"] if v["fps"] else 0
+        self.log("  [%d/%d] shrink %s  %dx%d -> %s, %s -> %s, decode %s -> %s ms/frame"
+                 " (p95 %s -> %s, a frame lasts %.1f ms)  [%.0fs]" % (
+                     n, total, rel, v["width"], v["height"], info.get("out_size", "?"), human(v["size"]),
+                     human(new_size), info.get("src_decode_avg_ms", "?"), info.get("out_decode_avg_ms", "?"),
+                     info.get("src_decode_p95_ms", "?"), info.get("out_decode_p95_ms", "?"), budget, elapsed))
+        # The original goes to the backup folder (a rename, not a copy: videos
+        # are big) and the new file takes its place.
+        dst = os.path.join(self.backup_dir, *rel.split("/"))
+        if not os.path.isdir(os.path.dirname(dst)):
+            os.makedirs(os.path.dirname(dst))
+        if os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(self._abs(rel), dst)
+        self.state["moved"].append(rel)
+        os.rename(tmp, self._abs(rel))
+        self.state["created"].append(rel)
+        self._save_state()
+
+    def _patch_video_xnbs(self, shrunk, originals):
+        """A video loaded through the content pipeline has an XNB next to it
+        that records its size; FNA-derived players refuse a video whose size
+        differs from the XNB's."""
+        by_name = {}
+        for rel in shrunk:
+            by_name[os.path.splitext(rel)[0].lower()] = rel
+        for path in _walk(self.root):
+            if not path.lower().endswith(".xnb"):
+                continue
+            rel = _rel(self.root, path)
+            stem = os.path.splitext(rel)[0].lower()
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(4096)
+                if len(head) < 14 or head[:3] != b"XNB":
+                    continue
+                if head[5] & 0x80:
+                    raise ValueError("LZX-compressed")
+                # Only the start is decompressed to tell videos from the
+                # (big) texture atlases.
+                prefix = lz4_block_prefix(head[14:], 1024) if head[5] & 0x40 else head[10:]
+                if b"VideoReader" not in prefix:
+                    continue
+                xnb = XnbFile(path)
+                info = xnb_video_info(xnb)
+            except (ValueError, IndexError, struct.error) as e:
+                if stem in by_name:
+                    self.log("  cannot read %s (%s); the game may refuse %s" % (rel, e, by_name[stem]))
+                continue
+            if info is None:
+                continue
+            target = by_name.get(stem)
+            if target is None and info["filename"]:
+                ref = posixpath.normpath(posixpath.join(posixpath.dirname(rel),
+                                                       info["filename"].replace("\\", "/")))
+                target = by_name.get(os.path.splitext(ref)[0].lower())
+            if target is None:
+                continue
+            orig = originals[target]
+            w, h = shrunk[target]
+            if (info["width"], info["height"]) != (orig["width"], orig["height"]):
+                self.log("  leave %s: it says %dx%d, the video was %dx%d" % (
+                    rel, info["width"], info["height"], orig["width"], orig["height"]))
+                continue
+            data = bytearray(xnb.payload)
+            struct.pack_into("<i", data, info["width_offset"], w)
+            struct.pack_into("<i", data, info["height_offset"], h)
+            xnb.payload = bytes(data)
+            self._rewrite_bytes(rel, xnb.to_bytes(compress=bool(xnb.flags & 0x40)),
+                                "video size %dx%d -> %dx%d" % (orig["width"], orig["height"], w, h))
+
     def _rewrite_bytes(self, rel, data, what):
         path = self._abs(rel)
         self.log("  patch %-56s (%s)" % (rel, what))
@@ -2428,10 +2814,11 @@ def reset(gamedir, log=print):
 STATUS_OK, STATUS_NOT_PREPARED, STATUS_OUTDATED = 0, 1, 2
 
 
-def prepared_status(gamedir, textures=None):
+def prepared_status(gamedir, textures=None, videos=None):
     """STATUS_OK: prepared by this version and unchanged since.
     STATUS_OUTDATED: prepared by another version of this tool, or with
-    another texture mode than `textures`; `restore` and prepare again.
+    another texture or video mode than `textures`/`videos`; `restore` and
+    prepare again.
     STATUS_NOT_PREPARED: never prepared, or the game files were copied again
     since (use `reset`)."""
     root = os.path.abspath(gamedir)
@@ -2445,6 +2832,8 @@ def prepared_status(gamedir, textures=None):
         return STATUS_OUTDATED
     if textures is not None and state.get("textures", "full") != textures:
         return STATUS_OUTDATED
+    if videos is not None and state.get("videos", "full") != videos:
+        return STATUS_OUTDATED
     return STATUS_OK
 
 
@@ -2455,6 +2844,12 @@ def is_prepared(gamedir):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+def video_mode(value):
+    if value == "full" or re.match(r"^[1-9][0-9]*x[1-9][0-9]*$", value):
+        return value
+    raise argparse.ArgumentTypeError("expected full or WIDTHxHEIGHT, e.g. 640x480")
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ypport.py", description=__doc__.split("\n\n")[0])
@@ -2470,6 +2865,13 @@ def main(argv=None):
     p.add_argument("--top", type=int, default=20, help="list this many of the largest images")
     p.add_argument("--alpha", action="store_true",
                    help="decode textures to check their alpha and project 16-bit memory use")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("videos", help="list the game's Ogg Theora videos")
+    p.add_argument("dir")
+    p.add_argument("--bench", action="store_true",
+                   help="decode every video with %s and report the time per frame" % VIDEO_TOOL)
+    p.add_argument("--tool", help="path of %s (default: bin.<arch>/ next to this script)" % VIDEO_TOOL)
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("xnb2png", help="save a texture XNB as PNG, optionally as it looks after conversion")
@@ -2502,6 +2904,12 @@ def main(argv=None):
     p.add_argument("--textures", choices=TEXTURE_MODES, default="full",
                    help="auto16: Color textures with binary alpha -> Bgra5551; 16bit: also the "
                         "rest -> Bgra4444; full: leave textures alone")
+    p.add_argument("--videos", type=video_mode, default="full",
+                   help="WxH: re-encode videos larger than WxH to fit it; full: leave them alone")
+    p.add_argument("--video-tool", help="path of %s (default: searched in --native-dir and "
+                                        "bin.<arch>/ next to this script)" % VIDEO_TOOL)
+    p.add_argument("--video-quality", type=int, default=44, help="Theora quality 0-63 (default 44)")
+    p.add_argument("--jobs", type=int, help="videos encoded at a time (default: CPU cores, at most 4)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true", help="restore first if already prepared")
 
@@ -2512,9 +2920,10 @@ def main(argv=None):
     p.add_argument("dir")
 
     p = sub.add_parser("status", help="exit 0 if prepared and unchanged, 2 if prepared by another "
-                                      "version of this tool or texture mode, 1 otherwise")
+                                      "version of this tool or texture/video mode, 1 otherwise")
     p.add_argument("dir")
     p.add_argument("--textures", choices=TEXTURE_MODES)
+    p.add_argument("--videos", type=video_mode)
 
     args = ap.parse_args(argv)
     if args.cmd == "inspect":
@@ -2532,6 +2941,32 @@ def main(argv=None):
             sys.stdout.write("\n")
         else:
             print_textures(r)
+        return 0
+    if args.cmd == "videos":
+        root = os.path.abspath(args.dir)
+        videos = find_videos(root)
+        bench = None
+        if args.bench:
+            tool = args.tool or find_video_tool(_host_arch())
+            if tool is None:
+                print("no %s for this machine; pass --tool" % VIDEO_TOOL)
+                return 1
+            bench = {}
+            for v in videos:
+                sys.stderr.write("decoding %s ...\n" % v["path"])
+                proc = subprocess.Popen([tool, "--bench", os.path.join(root, v["path"])],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = proc.communicate()
+                b = parse_tool_output(out.decode("utf-8", "replace"))
+                if proc.returncode not in (0, 3):
+                    b["error"] = err.decode("utf-8", "replace").strip() or "exit %d" % proc.returncode
+                bench[v["path"]] = b
+                v["bench"] = b
+        if args.json:
+            json.dump(videos, sys.stdout, indent=1)
+            sys.stdout.write("\n")
+        else:
+            print_videos(videos, root, bench)
         return 0
     if args.cmd == "xnb2png":
         xnb = XnbFile(args.src)
@@ -2577,7 +3012,8 @@ def main(argv=None):
         try:
             Preparer(args.dir, framework_dir=args.framework_dir, dry_run=args.dry_run,
                      native_dirs=args.native_dir, native_arch=args.native_arch,
-                     textures=args.textures).run(app_name=args.app)
+                     textures=args.textures, videos=args.videos, video_tool=args.video_tool,
+                     video_quality=args.video_quality, jobs=args.jobs).run(app_name=args.app)
         except (PrepareError, BundleError) as e:
             print("ERROR: %s" % e)
             return 3
@@ -2594,7 +3030,7 @@ def main(argv=None):
         reset(args.dir)
         return 0
     if args.cmd == "status":
-        return prepared_status(args.dir, textures=args.textures)
+        return prepared_status(args.dir, textures=args.textures, videos=args.videos)
     ap.print_help()
     return 1
 

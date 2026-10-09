@@ -234,6 +234,53 @@ If the atlases still do not fit, the next steps are half-resolution GL textures 
 logical size (so the game's source rectangles stay valid), which needs a hook into MonoGame's
 texture upload, or evicting atlases the current scene does not use.
 
+## Cutscenes
+
+With the game running, the user reported cutscenes "lagging badly, and not evenly: one moment of
+a video is fine, the next one lags". Theorafile decodes on the CPU, in the game's thread, one
+frame at a time; the player compares elapsed time with the frames shown and decodes the missing
+ones in one go when it falls behind. The library is already built with `-O3` and libtheora's
+NEON code for aarch64, and post-processing is off, so what is left is the amount of work per
+frame. It grows with the number of pixels, and within a video with the bitrate of each frame:
+frames with a lot of motion carry more coefficients to decode than still ones. A video that
+decodes just under real time on average therefore stutters exactly in its busy moments, which
+matches the report. On top of the decoding come the YUV planes uploaded to the GPU every frame.
+The RG40XX H shows 640x480, so anything above that is decoded only to be scaled down again.
+
+`prepare --videos WxH` (the launcher passes the screen size, at most 960x540) re-encodes every Ogg
+Theora file whose picture is larger than WxH to fit it, with `tools/bin.aarch64/ogvshrink`
+(`src/ogvshrink`):
+
+- Decoding uses the libtheora inside Theorafile, NEON included; encoding uses the encoder of
+  libtheora 1.2.0, which Theorafile leaves out. The two trees differ only in license headers and
+  small cleanups, so the encoder files compile against Theorafile's decoder. On aarch64 the
+  encoder runs its C code (libtheora's ARM encoder assembly is 32-bit only).
+- Scaling is an area filter (exact for 2:1 and 3:1), vertical pass first so the per-sample gather
+  runs on a third of the rows. The picture keeps its aspect ratio, frame rate, pixel format,
+  colour space and comments; quality 44 (Theora's 0-63 scale) at speed level 3.
+- Vorbis audio streams are copied page by page, unchanged, and interleaved with the new video
+  pages by time. Ogg Skeleton and other streams that Theorafile ignores are left out.
+- Duplicate-frame packets (zero-length, "show the previous frame again") stay duplicates, also
+  when a run is longer than the keyframe interval. Theorafile's player counts packets, not
+  granule positions, so the output has exactly as many packets as the input; `ogvshrink` decodes
+  its output again and refuses it when the count differs.
+- A video loaded through the content pipeline has an XNB next to it (VideoReader: file name,
+  duration, width, height, fps, soundtrack type) and FNA's `Video` refuses a file whose size
+  differs from the XNB's. `prepare` finds such XNBs (by name, or by the file name they contain)
+  and writes the new size into them; LZ4-compressed ones too.
+- Up to four videos are encoded at a time. The original files are moved to `.ypport/backup`
+  (videos are big, so a rename rather than a copy) and come back with `restore`.
+
+Each line in `patchlog.txt` gives the decoding time per frame before and after, measured while
+shrinking, and the time a frame lasts. On a PC (x86_64, no SIMD in this build) a 1920x1080 test
+video went from 4.1 ms to 0.27 ms per frame (15x) and from 12 MB to 0.6 MB, at 42.8 dB PSNR
+against an area-scaled original; a 1280x720 4:2:2 one from 4.8 to 1.2 ms. `ypport.py videos DIR
+--bench` decodes every video and reports the same figures without changing anything.
+
+`memlog.txt` also has the CPU use of the whole game and of its main thread (100 = one core),
+the clock of CPU 0 and the SoC temperature. A main thread at 100 during a cutscene means decoding
+is still too slow; a falling clock with a rising temperature means throttling.
+
 ## If the build is NativeAOT
 
 NativeAOT compiles the IL to machine code and drops it, so there is nothing to retarget. The
@@ -257,8 +304,9 @@ exists on Linux. The Steam Linux build is DesktopGL by definition; use that one.
 
 These need the real game and the device:
 
-- **Video performance**: Theora decoding on the Cortex-A53 uses the NEON code paths of
-  libtheora; cutscene resolution decides whether it keeps up.
+- **Video performance**: cutscenes lagged at their original size; see "Cutscenes". Whether the
+  game's player draws a smaller video scaled to the screen (it reads the size from Theorafile)
+  is to be confirmed on the device; `YP_VIDEOS=full` brings the original files back.
 - **SDL2 version**: the game's MonoGame was built against SDL 2.32; the firmware's SDL2 must
   export every function MonoGame binds at startup.
 - **Graphics**: MonoGame DesktopGL needs desktop OpenGL. ROCKNIX on the H700 uses Mesa's Panfrost
@@ -279,6 +327,7 @@ These need the real game and the device:
 2. ~~First boot on ROCKNIX / RG40XX H~~: setup and runtime work; `game.dll` needed retargeting
    (done); content loading ran out of memory until the atlases were stored as 16-bit (done) -
    the game now runs, and runs well.
-3. Video playback, resolution/scaling, controls.
+3. Video playback: cutscenes lagged at full size; they are now re-encoded to fit the screen
+   (to be confirmed on the device). Resolution/scaling, controls.
 4. Performance: ReadyToRun precompilation, GC settings, swap.
 5. Screenshot/cover, test on other firmwares (muOS, Knulli, ArkOS), submit to PortMaster-New.

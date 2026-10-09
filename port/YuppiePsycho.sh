@@ -99,8 +99,23 @@ if [ -z "${YP_TEXTURES:-}" ]; then
 fi
 export YP_TEXTURES
 
+# Cutscenes are Ogg Theora, decoded in software on one core. A Cortex-A53 cannot
+# keep up with HD video, so the setup re-encodes videos larger than the screen
+# to fit it (at most 960x540): a 640x360 video needs about a tenth of the
+# decoding work of a 1920x1080 one. YP_VIDEOS=full keeps the original videos;
+# YP_VIDEOS=WxH picks another size.
+if [ -z "${YP_VIDEOS:-}" ]; then
+  vw="${DISPLAY_WIDTH:-640}"
+  vh="${DISPLAY_HEIGHT:-480}"
+  case "$vw$vh" in *[!0-9]*|"") vw=640; vh=480 ;; esac
+  [ "$vw" -gt 960 ] && vw=960
+  [ "$vh" -gt 540 ] && vh=540
+  YP_VIDEOS="${vw}x${vh}"
+fi
+export YP_VIDEOS
+
 # --- first launch: make the copied game runnable on aarch64 -----------------
-python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" > /dev/null 2>&1
+python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" --videos "$YP_VIDEOS" > /dev/null 2>&1
 setup_status=$?
 if [ $setup_status -ne 0 ]; then
   if ! command -v python3 > /dev/null 2>&1; then
@@ -108,8 +123,8 @@ if [ $setup_status -ne 0 ]; then
     cleanup; sleep 5; exit 1
   fi
   if [ $setup_status -eq 2 ]; then
-    # Prepared by an older version of the port or with another texture mode:
-    # undo it, then set up again.
+    # Prepared by an older version of the port or with another texture or
+    # video mode: undo it, then set up again.
     python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"
   elif [ -f "$DATADIR/.ypport/state.json" ]; then
     # The game was copied again (e.g. an update): forget the old setup.
@@ -118,13 +133,13 @@ if [ $setup_status -ne 0 ]; then
   if [ -f "$controlfolder/utils/patcher.txt" ]; then
     export PATCHER_FILE="$GAMEDIR/tools/patchscript"
     export PATCHER_GAME="Yuppie Psycho"
-    export PATCHER_TIME="2 to 10 minutes"
+    export PATCHER_TIME="5 to 30 minutes"
     source "$controlfolder/utils/patcher.txt"
   else
     $ESUDO chmod 666 /dev/tty0 2>/dev/null
     bash "$GAMEDIR/tools/patchscript" 2>&1 | tee /dev/tty0
   fi
-  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" > /dev/null 2>&1; then
+  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" --videos "$YP_VIDEOS" > /dev/null 2>&1; then
     pm_message "Setup failed. See yuppiepsycho/patchlog.txt and yuppiepsycho/log.txt."
     cleanup; sleep 5; exit 1
   fi

@@ -5,7 +5,7 @@
 #   ./build.sh --no-dotnet   smaller port that uses PortMaster's dotnet-8.0.12 runtime
 #
 # Needs: python3, zip, curl, git, and zig (`pip install ziglang`) or an
-# aarch64 cross compiler in $CC for the Steam stub and Theorafile.
+# aarch64 cross compiler in $CC for the Steam stub, Theorafile and ogvshrink.
 # Third-party aarch64 binaries (gl4es, OpenAL Soft, FMOD) are taken from
 # PortMaster-New at a pinned commit, the .NET runtime from Microsoft's NuGet
 # packages; everything downloaded is checked against SHA-256 sums.
@@ -112,6 +112,13 @@ for f in "$REPO/build/theorafile-src/licenses/"*; do
   cp "$f" "$PORT/licenses/theorafile-$(basename "$f").txt"
 done
 
+echo "== ogvshrink"
+THEORAFILE_SRC="$REPO/build/theorafile-src" LIBTHEORA_SRC="$REPO/build/libtheora-src" \
+  "$REPO/src/ogvshrink/build.sh" "$REPO/build/ogvshrink" aarch64
+mkdir -p "$PORT/tools/bin.aarch64"
+cp "$REPO/build/ogvshrink/aarch64/ogvshrink" "$PORT/tools/bin.aarch64/"
+cp "$REPO/build/libtheora-src/COPYING" "$PORT/licenses/libtheora-COPYING.txt"
+
 echo "== licenses"
 cp "$REPO/LICENSE" "$PORT/licenses/LICENSE.port.txt"
 cat > "$PORT/licenses/NOTICE.txt" << 'EOF'
@@ -128,6 +135,10 @@ Theorafile (libtheorafile.so) - zlib license; bundles libogg, libvorbis and
   libtheora (BSD-style licenses). See theorafile-*.txt.
   https://github.com/FNA-XNA/Theorafile
 
+tools/bin.aarch64/ogvshrink - written for this port (LICENSE.port.txt), built
+  with libogg and libtheora from Theorafile and the libtheora 1.2.0 encoder
+  (BSD-style, see libtheora-COPYING.txt). https://github.com/xiph/theora
+
 FMOD Engine 2.02.18 core (libfmod.so*)
   Made with FMOD Studio by Firelight Technologies Pty Ltd.
   https://www.fmod.com - redistributed under the FMOD EULA as part of the game port.
@@ -142,7 +153,8 @@ The game itself is not included. Yuppie Psycho (c) Baroque Decay.
 EOF
 
 echo "== zip"
-chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript" "$PORT/tools/memwatch.sh"
+chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript" "$PORT/tools/memwatch.sh" \
+  "$PORT/tools/bin.aarch64/ogvshrink"
 rm -f "$DIST/yuppiepsycho.zip"
 (cd "$STAGE" && zip -q -r -X "$DIST/yuppiepsycho.zip" YuppiePsycho.sh yuppiepsycho)
 (cd "$DIST" && sha256sum yuppiepsycho.zip > yuppiepsycho.zip.sha256)

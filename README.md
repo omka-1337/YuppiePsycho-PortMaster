@@ -26,6 +26,7 @@ This project uses AI to write code and documentation. All code and documentation
   - [3. Copy the game across](#3-copy-the-game-across)
   - [4. Play](#4-play)
 - [Memory](#memory)
+- [Cutscenes](#cutscenes)
 - [Controls](#controls)
 - [Compile](#compile)
 
@@ -71,13 +72,17 @@ ports/yuppiepsycho/gamedata/
 
 ### 4. Play
 
-Launch *Yuppie Psycho* from Ports. First launch runs setup (about one minute). Later launches start the game directly.
+Launch *Yuppie Psycho* from Ports. First launch runs setup (5 to 30 minutes: textures and cutscenes are converted). Later launches start the game directly.
 
 Logs: `ports/yuppiepsycho/log.txt`, `patchlog.txt`.
 
 ## Memory
 
 The game ships 747 MB of RGBA texture atlases. On 1 GB devices the port converts them to 16-bit (374 MB) and uses zram + a memory watchdog. This is automatic on first launch.
+
+## Cutscenes
+
+The cutscenes are HD Theora videos, too heavy for the device's CPU to decode in real time. On first launch the port re-encodes them to the screen size (640x360 on a 640x480 screen), keeping sound and timing. The originals stay in `gamedata/.ypport/backup`; `YP_VIDEOS=full` in `ports/yuppiepsycho/settings.txt` brings them back.
 
 ## Controls
 
@@ -100,4 +105,4 @@ On a Linux PC with `python3`, `git`, `curl`, `zip` and `pip install ziglang`:
 ./build.sh
 ```
 
-Produces `dist/yuppiepsycho.zip` (~33 MB) with the aarch64 .NET 8 runtime, Steam stub, Theorafile and required libraries. Use `./build.sh --no-dotnet` for a smaller package that relies on PortMaster’s runtime.
+Produces `dist/yuppiepsycho.zip` (~33 MB) with the aarch64 .NET 8 runtime, Steam stub, Theorafile, the cutscene re-encoder and required libraries. Use `./build.sh --no-dotnet` for a smaller package that relies on PortMaster’s runtime.

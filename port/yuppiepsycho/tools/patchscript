@@ -22,6 +22,7 @@ args=()
 [ -n "$FRAMEWORK_DIR" ] && args+=(--framework-dir "$FRAMEWORK_DIR")
 args+=(--native-arch "${YP_NATIVE_ARCH:-aarch64}")
 args+=(--textures "${YP_TEXTURES:-full}")
+args+=(--videos "${YP_VIDEOS:-full}")
 IFS=: read -r -a native_dirs <<< "${YP_NATIVE_DIRS:-$GAMEDIR/libs.aarch64}"
 for d in "${native_dirs[@]}"; do
   [ -n "$d" ] && args+=(--native-dir "$d")

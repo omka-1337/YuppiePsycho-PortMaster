@@ -23,8 +23,10 @@ before v2.5 must be converted by running the game once on the PC.
    `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/`, so that the file
    `ports/yuppiepsycho/gamedata/game.dll` exists.
 3. Start *Yuppie Psycho* from the Ports menu. The first launch prepares the files for ARM
-   (sets aside the x86_64 .NET runtime and libraries and puts aarch64 ones in their place). This
-   takes a minute or two and only happens again when the game files change.
+   (sets aside the x86_64 .NET runtime and libraries and puts aarch64 ones in their place),
+   stores the texture atlases as 16-bit on 1 GB devices and re-encodes the cutscenes to the
+   screen size. This takes 5 to 30 minutes and only happens again when the game files or these
+   settings change.
 
 The original files that the setup sets aside are kept in `gamedata/.ypport/backup`; nothing is
 deleted.
@@ -50,6 +52,9 @@ YP_GC_HEAP_LIMIT_MB=
 # auto16 = 16-bit only where transparency is all-or-nothing. Changing it re-runs the
 # setup on the next launch.
 YP_TEXTURES=16bit
+# Cutscenes larger than this are re-encoded to fit it (default: the screen size, at most
+# 960x540); full = keep the original videos. Changing it re-runs the setup.
+YP_VIDEOS=640x480
 ```
 
 ### Memory
@@ -58,8 +63,9 @@ The RG40XX H and similar devices have 1 GB of RAM shared between the system, the
 GPU, half of the game's PC minimum. The launcher therefore sets up 1 GB of compressed swap
 (zram, zstd) for the duration of the game, and runs a watchdog that stops the game before the
 device runs out of memory, because an exhausted 1 GB device freezes instead of recovering. The
-watchdog writes `ports/yuppiepsycho/memlog.txt` (available RAM, free swap, GPU/shmem, game memory,
-twice a second).
+watchdog writes `ports/yuppiepsycho/memlog.txt` twice a second: available RAM, free swap,
+GPU/shmem, game memory, CPU use of the game and of its main thread (100 = one core busy), CPU
+clock and temperature.
 
 The game's 62 texture atlases need about 750 MB once decoded, more than a 1 GB device can give
 the GPU. On such devices the setup stores them as 16-bit, which halves that to about 375 MB:
@@ -73,6 +79,24 @@ To see what an atlas looks like after conversion, on a PC:
 python3 tools/ypport.py xnb2png gamedata/content/atlas/hero_0.xnb hero.png
 python3 tools/ypport.py xnb2png gamedata/content/atlas/hero_0.xnb hero-16bit.png --as 16bit
 ```
+
+### Cutscenes
+
+The cutscenes are Ogg Theora videos, decoded in software on one CPU core. At their original
+size a Cortex-A53 cannot decode them in real time, so they stutter, mostly in scenes with a lot
+of motion. The setup therefore re-encodes videos that are larger than the screen to fit it
+(640x360 on a 640x480 screen); sound and timing are kept. `patchlog.txt` lists every video with
+its decoding time per frame before and after. The original videos are kept in
+`gamedata/.ypport/backup`; `YP_VIDEOS=full` in `settings.txt` puts them back. To list the
+videos (size, frame rate, length) on a PC or on the device:
+
+```
+python3 tools/ypport.py videos gamedata
+```
+
+On the device (over SSH), `--bench` also decodes every video and reports the time per frame.
+
+### FMOD
 
 The bundled aarch64 FMOD is 2.02.18, which accepts the game's 2.02 headers. If a future game
 update moves to another FMOD version and there is no sound, download the *FMOD Engine* for Linux
@@ -94,5 +118,5 @@ standard gamepad.
 - `ports/yuppiepsycho/log.txt` - last game run
 - `ports/yuppiepsycho/patchlog.txt` - first-time setup
 - `ports/yuppiepsycho/inspect.txt` - report about the game files when setup fails
-- `ports/yuppiepsycho/memlog.txt` - memory over time during the last run
+- `ports/yuppiepsycho/memlog.txt` - memory and CPU over time during the last run
 - To redo the setup from scratch, delete `gamedata/.ypport` **after** re-copying the game files.

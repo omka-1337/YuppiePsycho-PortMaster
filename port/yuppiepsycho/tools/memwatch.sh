@@ -8,6 +8,11 @@
 # and freezes instead of letting the kernel's OOM killer act. GPU buffers
 # (Panfrost) are shmem pages, so they show up in the "shmem" column.
 #
+# The last columns help with stutter: CPU use of the whole game and of its
+# main thread, which runs the game loop (100 = one core busy; a main thread
+# near 100 means the game cannot keep up), the clock of CPU 0 and the SoC
+# temperature (throttling).
+#
 # Free swap only counts as headroom while GPU buffers are a minor part of
 # memory: they are pinned and cannot be swapped out, and zram itself lives in
 # RAM. Measured on an RG40XX H: the game pinned 700 MB of textures with 700 MB
@@ -36,7 +41,11 @@ start=$(date +%s)
 low=0
 peak_rss=0
 peak_shmem=0
-echo "# t_s avail_mb swapfree_mb shmem_mb game_rss_mb game_swap_mb" > "$log"
+hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+freq_file=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
+temp_file=/sys/class/thermal/thermal_zone0/temp
+prev=""
+echo "# t_s avail_mb swapfree_mb shmem_mb game_rss_mb game_swap_mb game_cpu_pct main_cpu_pct cpu_mhz temp_c" > "$log"
 while kill -0 "$pid" 2>/dev/null; do
   read -r avail swapfree shmem < <(awk '
     /^MemAvailable:/ { a = $2 } /^SwapFree:/ { s = $2 } /^Shmem:/ { h = $2 }
@@ -45,9 +54,22 @@ while kill -0 "$pid" 2>/dev/null; do
     /^VmRSS:/ { r = $2 } /^VmSwap:/ { w = $2 }
     END { printf "%d %d\n", r / 1024, w / 1024 }' "/proc/$pid/status" 2>/dev/null)
   rss="${rss:-0}"
+  # Uptime, then utime + stime (fields 14 and 15, counted after the "(comm)"
+  # field) of the process and of its main thread.
+  now=$(awk 'FILENAME == "/proc/uptime" { printf "%s", $1; next }
+    { sub(/^.*\) /, ""); printf " %d", $12 + $13 }' /proc/uptime "/proc/$pid/stat" \
+    "/proc/$pid/task/$pid/stat" 2>/dev/null)
+  read -r cpu main_cpu < <(awk -v now="$now" -v prev="$prev" -v hz="$hz" 'BEGIN {
+    n = split(now, a, " "); m = split(prev, b, " ")
+    if (n < 3 || m < 3 || a[1] <= b[1]) { print "- -"; exit }
+    d = a[1] - b[1]
+    printf "%d %d\n", (a[2] - b[2]) * 100 / hz / d, (a[3] - b[3]) * 100 / hz / d }')
+  prev="$now"
+  mhz=$(awk '{ printf "%d", $1 / 1000 }' "$freq_file" 2>/dev/null)
+  temp=$(awk '{ printf "%d", $1 / 1000 }' "$temp_file" 2>/dev/null)
   [ "$rss" -gt "$peak_rss" ] && peak_rss=$rss
   [ "$shmem" -gt "$peak_shmem" ] && peak_shmem=$shmem
-  echo "$(( $(date +%s) - start )) $avail $swapfree $shmem $rss ${vswap:-0}" >> "$log"
+  echo "$(( $(date +%s) - start )) $avail $swapfree $shmem $rss ${vswap:-0} $cpu $main_cpu ${mhz:--} ${temp:--}" >> "$log"
   if [ "$avail" -lt "$min_mb" ] && { [ "$swapfree" -lt "$min_mb" ] || [ "$shmem" -gt "$gpu_heavy_mb" ]; }; then
     low=$((low + 1))
   else
