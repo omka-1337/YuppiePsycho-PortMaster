@@ -82,7 +82,7 @@ The game ships 747 MB of RGBA texture atlases. On 1 GB devices the port converts
 
 ## Cutscenes
 
-The cutscenes are HD Theora videos, too heavy for the device's CPU to decode in real time. On first launch the port re-encodes them to the screen size (640x360 on a 640x480 screen), keeping sound and timing. The originals stay in `gamedata/.ypport/backup`; `YP_VIDEOS=full` in `ports/yuppiepsycho/settings.txt` brings them back.
+The cutscenes are Theora videos, decoded on the CPU, and at HD size they stutter on these devices. On first launch the port re-encodes every video larger than the screen to fit it (640x360 on a 640x480 screen), keeping sound and timing. The originals stay in `gamedata/.ypport/backup`; `YP_VIDEOS=full` in `ports/yuppiepsycho/settings.txt` brings them back.
 
 ## Controls
 
