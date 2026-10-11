@@ -40,6 +40,14 @@ DEPS=(
   "celeste64/celeste64/libfmod.so 440556e5948d78dc60d08267afd8031065fe435a572bdb85954dafec2bd05ba3 libs.aarch64/libfmod.so libs.aarch64/libfmod.so.13"
 )
 
+# Omka-Patcher, the engine of the PC patcher (`patch`, `patch.bat`). The tag
+# is checked against the commit id, which pins the content (an archive's
+# sha256 is not stable on GitHub). OMKA_PATCHER_SRC=/path/to/checkout uses a
+# local copy instead, for working on both at once.
+OMKA_PATCHER_REPO=https://github.com/omka-1337/Omka-Patcher.git
+OMKA_PATCHER_TAG=""
+OMKA_PATCHER_COMMIT=""
+
 # .NET runtime for linux-arm64 from nuget.org (packages there are immutable)
 DOTNET_VERSION=8.0.31
 DOTNET_PACKS=(
@@ -113,11 +121,42 @@ for f in "$REPO/build/theorafile-src/licenses/"*; do
 done
 
 echo "== ogvshrink"
+# aarch64 for the handheld (and Linux aarch64 PCs), the rest for the PC patcher.
+PC_TARGETS=(linux-x86_64 windows-x86_64 macos-x86_64 macos-aarch64)
 THEORAFILE_SRC="$REPO/build/theorafile-src" LIBTHEORA_SRC="$REPO/build/libtheora-src" \
-  "$REPO/src/ogvshrink/build.sh" "$REPO/build/ogvshrink" aarch64
+  "$REPO/src/ogvshrink/build.sh" "$REPO/build/ogvshrink" aarch64 x86_64 windows-x86_64 macos-x86_64 macos-aarch64
 mkdir -p "$PORT/tools/bin.aarch64"
 cp "$REPO/build/ogvshrink/aarch64/ogvshrink" "$PORT/tools/bin.aarch64/"
+for target in "${PC_TARGETS[@]}"; do
+  mkdir -p "$PORT/tools/bin.$target"
+  cp "$REPO/build/ogvshrink/${target#linux-}/"ogvshrink* "$PORT/tools/bin.$target/"
+done
 cp "$REPO/build/libtheora-src/COPYING" "$PORT/licenses/libtheora-COPYING.txt"
+
+echo "== Omka-Patcher"
+if [ -n "${OMKA_PATCHER_SRC:-}" ]; then
+  OP="$(cd "$OMKA_PATCHER_SRC" && pwd)"
+  echo "  local copy $OP"
+else
+  if [ -z "$OMKA_PATCHER_TAG" ] || [ -z "$OMKA_PATCHER_COMMIT" ]; then
+    echo "OMKA_PATCHER_TAG/OMKA_PATCHER_COMMIT are not set in build.sh; set them, or point"
+    echo "OMKA_PATCHER_SRC at an Omka-Patcher checkout."
+    exit 1
+  fi
+  OP="$REPO/build/omka-patcher"
+  [ -d "$OP/.git" ] || git clone -q "$OMKA_PATCHER_REPO" "$OP"
+  git -C "$OP" fetch -q --tags origin
+  got="$(git -C "$OP" rev-parse "$OMKA_PATCHER_TAG^{commit}")"
+  if [ "$got" != "$OMKA_PATCHER_COMMIT" ]; then
+    echo "Omka-Patcher $OMKA_PATCHER_TAG is $got, expected $OMKA_PATCHER_COMMIT"
+    exit 1
+  fi
+  git -C "$OP" checkout -q "$OMKA_PATCHER_COMMIT"
+  echo "  $OMKA_PATCHER_TAG ($OMKA_PATCHER_COMMIT)"
+fi
+cp "$OP/omkapatcher.py" "$OP/devices.json" "$PORT/tools/"
+cp "$OP/patch" "$OP/patch.bat" "$PORT/"
+cp "$OP/LICENSE" "$PORT/licenses/LICENSE.omka-patcher.txt"
 
 echo "== licenses"
 cp "$REPO/LICENSE" "$PORT/licenses/LICENSE.port.txt"
@@ -135,7 +174,7 @@ Theorafile (libtheorafile.so) - zlib license; bundles libogg, libvorbis and
   libtheora (BSD-style licenses). See theorafile-*.txt.
   https://github.com/FNA-XNA/Theorafile
 
-tools/bin.aarch64/ogvshrink - written for this port (LICENSE.port.txt), built
+tools/bin.*/ogvshrink - written for this port (LICENSE.port.txt), built
   with libogg and libtheora from Theorafile and the libtheora 1.2.0 encoder
   (BSD-style, see libtheora-COPYING.txt). https://github.com/xiph/theora
 
@@ -146,15 +185,19 @@ FMOD Engine 2.02.18 core (libfmod.so*)
 .NET runtime (dotnet/, when bundled) - MIT, see LICENSE.dotnet.txt and
   THIRD-PARTY-NOTICES.dotnet.txt. https://github.com/dotnet/runtime
 
-Steam API stub (libsteam_api*.so, libsdkencryptedappticket*.so) and tools/ypport.py
+Steam API stub (libsteam_api*.so, libsdkencryptedappticket*.so), tools/ypport.py,
+tools/recipe.py
   Written for this port, see LICENSE.port.txt. Not affiliated with Valve.
+
+Omka-Patcher (tools/omkapatcher.py, tools/devices.json, patch, patch.bat) - MIT,
+  see LICENSE.omka-patcher.txt. https://github.com/omka-1337/Omka-Patcher
 
 The game itself is not included. Yuppie Psycho (c) Baroque Decay.
 EOF
 
 echo "== zip"
 chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript" "$PORT/tools/memwatch.sh" \
-  "$PORT/tools/bin.aarch64/ogvshrink"
+  "$PORT/patch" "$PORT/tools/omkapatcher.py" "$PORT/tools/bin."*/ogvshrink*
 rm -f "$DIST/yuppiepsycho.zip"
 (cd "$STAGE" && zip -q -r -X "$DIST/yuppiepsycho.zip" YuppiePsycho.sh yuppiepsycho)
 (cd "$DIST" && sha256sum yuppiepsycho.zip > yuppiepsycho.zip.sha256)

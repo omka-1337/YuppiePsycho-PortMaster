@@ -90,32 +90,46 @@ if [ -n "$FMOD_LIBDIR" ] && [ -f "$DATADIR/.ypport/launch.env" ]; then
   fi
 fi
 
-# The game's 62 texture atlases need ~750 MB decoded, more than a 1 GB device can
-# give the GPU. There they are stored as 16-bit (half the memory): Bgra5551 where
-# transparency is all-or-nothing, Bgra4444 where it is soft (53 of the 62).
+# What this handheld needs: Omka-Patcher's --detect applies the recipe's
+# profile() (tools/recipe.py) to this hardware, the same rule the PC patcher
+# applies to the model picked there:
+# - The game's 62 texture atlases need ~750 MB decoded, more than a 1 GB device
+#   can give the GPU. There they are stored as 16-bit (half the memory):
+#   Bgra5551 where transparency is all-or-nothing, Bgra4444 where it is soft.
+# - Cutscenes are Ogg Theora, decoded in software on one core. A Cortex-A53
+#   cannot keep up with HD video, so the setup re-encodes videos larger than
+#   the screen to fit it (at most 960x540): a 640x360 video needs about a tenth
+#   of the decoding work of a 1920x1080 one. Chips with a Cortex-A75 class
+#   core (Snapdragon, RK3588) play the originals.
+# YP_TEXTURES / YP_VIDEOS in settings.txt override this.
 mem_total_mb=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
-if [ -z "${YP_TEXTURES:-}" ]; then
-  if [ "${mem_total_mb:-0}" -lt 1800 ]; then YP_TEXTURES=16bit; else YP_TEXTURES=full; fi
-fi
-export YP_TEXTURES
+vw="${DISPLAY_WIDTH:-640}"
+vh="${DISPLAY_HEIGHT:-480}"
+case "$vw$vh" in *[!0-9]*|"") vw=640; vh=480 ;; esac
+YP_AUTO_TEXTURES=16bit
+YP_AUTO_VIDEOS=640x480
+eval "$(python3 "$GAMEDIR/tools/omkapatcher.py" --detect "${vw}x${vh}" 2> /dev/null)"
+echo "device: ${mem_total_mb} MB RAM, ${vw}x${vh}, fast CPU core: ${YP_DEVICE_FAST_CPU:-?}" \
+     "-> textures $YP_AUTO_TEXTURES, videos $YP_AUTO_VIDEOS"
 
-# Cutscenes are Ogg Theora, decoded in software on one core. A Cortex-A53 cannot
-# keep up with HD video, so the setup re-encodes videos larger than the screen
-# to fit it (at most 960x540): a 640x360 video needs about a tenth of the
-# decoding work of a 1920x1080 one. YP_VIDEOS=full keeps the original videos;
-# YP_VIDEOS=WxH picks another size.
-if [ -z "${YP_VIDEOS:-}" ]; then
-  vw="${DISPLAY_WIDTH:-640}"
-  vh="${DISPLAY_HEIGHT:-480}"
-  case "$vw$vh" in *[!0-9]*|"") vw=640; vh=480 ;; esac
-  [ "$vw" -gt 960 ] && vw=960
-  [ "$vh" -gt 540 ] && vh=540
-  YP_VIDEOS="${vw}x${vh}"
+# A game prepared on a PC (./patch) is used as it is, unless its textures need
+# more memory than this device has; values from settings.txt must match exactly.
+status_args=()
+if [ -n "${YP_TEXTURES:-}" ]; then
+  status_args+=(--textures "$YP_TEXTURES")
+else
+  YP_TEXTURES="$YP_AUTO_TEXTURES"
+  status_args+=(--textures-max "$YP_TEXTURES")
 fi
-export YP_VIDEOS
+if [ -n "${YP_VIDEOS:-}" ]; then
+  status_args+=(--videos "$YP_VIDEOS")
+else
+  YP_VIDEOS="$YP_AUTO_VIDEOS"
+fi
+export YP_TEXTURES YP_VIDEOS
 
 # --- first launch: make the copied game runnable on aarch64 -----------------
-python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" --videos "$YP_VIDEOS" > /dev/null 2>&1
+python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" "${status_args[@]}" > /dev/null 2>&1
 setup_status=$?
 if [ $setup_status -ne 0 ]; then
   if ! command -v python3 > /dev/null 2>&1; then
@@ -124,8 +138,14 @@ if [ $setup_status -ne 0 ]; then
   fi
   if [ $setup_status -eq 2 ]; then
     # Prepared by an older version of the port or with another texture or
-    # video mode: undo it, then set up again.
-    python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"
+    # video mode: undo it, then set up again. The PC patcher keeps no copy of
+    # the original files (they are in Steam), so its output cannot be undone
+    # here: the player patches again for this handheld.
+    if ! python3 "$GAMEDIR/tools/ypport.py" restore "$DATADIR"; then
+      prepared_for="$(. "$DATADIR/.ypport/launch.env" 2> /dev/null; echo "$YP_PREPARED_FOR")"
+      pm_message "The game was prepared on a PC for ${prepared_for:-another handheld} (or by an older version of the port), not for this one. Run the patcher on the PC again and pick this handheld."
+      cleanup; sleep 8; exit 1
+    fi
   elif [ -f "$DATADIR/.ypport/state.json" ]; then
     # The game was copied again (e.g. an update): forget the old setup.
     python3 "$GAMEDIR/tools/ypport.py" reset "$DATADIR"
@@ -139,7 +159,7 @@ if [ $setup_status -ne 0 ]; then
     $ESUDO chmod 666 /dev/tty0 2>/dev/null
     bash "$GAMEDIR/tools/patchscript" 2>&1 | tee /dev/tty0
   fi
-  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" --textures "$YP_TEXTURES" --videos "$YP_VIDEOS" > /dev/null 2>&1; then
+  if ! python3 "$GAMEDIR/tools/ypport.py" status "$DATADIR" "${status_args[@]}" > /dev/null 2>&1; then
     pm_message "Setup failed. See yuppiepsycho/patchlog.txt and yuppiepsycho/log.txt."
     cleanup; sleep 5; exit 1
   fi

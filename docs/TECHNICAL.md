@@ -53,8 +53,15 @@ gamedata/ runnable with `dotnet <game>.dll` on aarch64
 "Park" means move into `gamedata/.ypport/backup/` preserving the relative path. `restore` puts
 everything back byte-for-byte (tested), `reset` forgets the state without touching files (used
 when the user copies a new game version over a prepared folder), `status` compares a fingerprint
-(size and mtime) of the main assembly and of every file prepare parked, rewrote or installed, so
-a re-copied game triggers a fresh setup.
+(sizes of every file prepare parked, rewrote or installed, plus a hash of the main assembly) so
+a re-copied game triggers a fresh setup. Modification times are left out since states of
+fingerprint kind 2: a folder prepared on a PC loses them on the way to the SD card (`cp`
+without `-p`, FAT's 2-second resolution), and an mtime fingerprint would make the launcher
+discard the state and prepare the already prepared files again. Older states keep the old
+fingerprint.
+
+`prepare --no-backup` deletes what it would park instead of moving it to the backup. The PC
+patcher uses it (the original is the Steam installation); such a state refuses `restore`.
 
 ### CPU-stamped IL assemblies
 
@@ -179,6 +186,35 @@ entry points used by Steamworks.NET 15.0.1 / 20.1.0 / 20.2.0 / 2024.8.0 and Face
   Steamworks.NET 20.2's full `CSteamAPIContext.Init()`.
 - `YP_STEAM_STUB_TRACE=1` logs the first call of each entry point, which shows exactly which
   Steam features the game touches.
+
+## PC patcher
+
+The patcher is [Omka-Patcher](https://github.com/omka-1337/Omka-Patcher), shared with other
+ports and fetched by `build.sh` at a pinned tag: `patch`, `patch.bat`, `tools/omkapatcher.py`
+and `tools/devices.json` in the package. It provides the terminal UI, the handheld list (maker,
+model, chip, RAM, screen), finding the game in Steam and copying it into `gamedata` (saves
+kept). What the game needs is in this port's recipe, `tools/recipe.py`:
+
+| Recipe | |
+|--|--|
+| `profile(device)` | `textures`: `16bit` below 1800 MB of RAM, else `full`; `videos`: `full` if the chip has a Cortex-A75 class or newer core, else the screen size capped at 960x540 |
+| `patch(ctx)` | `ypport.Preparer` with `backup=False`, the port's `libs.aarch64` and .NET framework folder, and `ogvshrink` built for the PC (`tools/bin.<os>-<arch>/`, by zig: Linux x86_64, Windows x86_64 with only the UCRT, macOS x86_64 and arm64, the latter ad-hoc signed as Apple Silicon requires) |
+| `check`, `check_game` | refuses the source tree (no `libs.aarch64`) and the macOS Steam build, which keeps its content in `Contents/Resources` apart from the assemblies |
+
+On a 12-thread PC the 1 GB preset (16-bit atlases, 29 videos to 640x360) takes about 4.5
+minutes, copy included.
+
+On the handheld the launcher runs `omkapatcher.py --detect WxH`, which applies the same
+`profile()` to the hardware it runs on (MemTotal, `CPU implementer`/`CPU part` from
+`/proc/cpuinfo`, the screen). `status --textures-max` then accepts any prepared texture mode
+that needs no more memory than the handheld's own, and any video mode, so the patcher's choice
+stands; only modes set in `settings.txt` must match exactly. A game prepared for a handheld
+with more memory is refused (status 2, `restore` impossible without a backup) with a message
+to run the patcher again.
+
+To work on the patcher and the port together, point `OMKA_PATCHER_SRC` at an Omka-Patcher
+checkout: `build.sh` takes it from there instead of the pinned tag, and `tests/test_recipe.py`
+looks for it in `OMKA_PATCHER_SRC`, `../../Omka-Patcher` and `build/omka-patcher`.
 
 ## Memory on 1 GB devices
 

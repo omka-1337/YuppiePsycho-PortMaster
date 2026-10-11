@@ -3,6 +3,7 @@
 
     python3 -m unittest discover -s tests -p 'test_*.py'
 """
+import json
 import os
 import struct
 import sys
@@ -375,6 +376,75 @@ class VideoTests(unittest.TestCase):
                 for i in range(5)]
         ypport.run_jobs(cmds, 2, lambda i, rc, out, err: seen.append((i, rc, out.strip())))
         self.assertEqual(sorted(seen), [(i, i % 2, "n=%d" % i) for i in range(5)])
+
+
+class StateTests(unittest.TestCase):
+    def prepared(self, d, **state):
+        """A folder as prepare leaves it: game.dll retargeted, deps.json
+        rewritten, libfoo.so parked."""
+        with open(os.path.join(d, "game.dll"), "wb") as f:
+            f.write(b"MZ retargeted")
+        with open(os.path.join(d, "game.deps.json"), "w") as f:
+            f.write("{}")
+        os.makedirs(os.path.join(d, ypport.STATE_DIR))
+        st = {"version": ypport.VERSION, "main": "game.dll", "moved": ["libfoo.so"],
+              "rewritten": ["game.deps.json"], "created": [], "extracted": [],
+              "textures": "16bit", "videos": "640x480", "fingerprint_kind": ypport.FINGERPRINT_KIND}
+        st.update(state)
+        st["fingerprint"] = ypport.fingerprint(d, st)
+        with open(os.path.join(d, ypport.STATE_DIR, "state.json"), "w") as f:
+            json.dump(st, f)
+        return st
+
+    def test_fingerprint_survives_copy_without_mtimes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.prepared(d)
+            os.utime(os.path.join(d, "game.dll"), (1, 1))  # cp without -p, FAT rounding
+            self.assertEqual(ypport.prepared_status(d), ypport.STATUS_OK)
+            # copying the game over it again shows
+            with open(os.path.join(d, "libfoo.so"), "wb") as f:
+                f.write(b"\x7fELF")
+            self.assertEqual(ypport.prepared_status(d), ypport.STATUS_NOT_PREPARED)
+
+    def test_old_states_keep_mtime_fingerprint(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.prepared(d, fingerprint_kind=1)
+            self.assertEqual(ypport.prepared_status(d), ypport.STATUS_OK)
+            os.utime(os.path.join(d, "game.dll"), (1, 1))
+            self.assertEqual(ypport.prepared_status(d), ypport.STATUS_NOT_PREPARED)
+
+    def test_status_texture_memory(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.prepared(d, textures="full", videos="full")
+            self.assertEqual(ypport.prepared_status(d, textures_max="full"), ypport.STATUS_OK)
+            self.assertEqual(ypport.prepared_status(d, textures_max="16bit"), ypport.STATUS_OUTDATED)
+            self.assertEqual(ypport.prepared_status(d, textures="full", videos="640x480"),
+                             ypport.STATUS_OUTDATED)
+        with tempfile.TemporaryDirectory() as d:
+            self.prepared(d, textures="16bit")
+            self.assertEqual(ypport.prepared_status(d, textures_max="full"), ypport.STATUS_OK)
+
+    def test_no_backup_cannot_be_restored(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.prepared(d, backup=False, device="Anbernic RG40XX H")
+            self.assertRaises(ypport.PrepareError, ypport.restore, d, log=lambda *a: None)
+            self.assertTrue(os.path.exists(os.path.join(d, ypport.STATE_DIR, "state.json")))
+
+
+class VideoToolTests(unittest.TestCase):
+    def test_find_video_tool_by_platform(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, head in (("ogvshrink", b"\x7fELF\x02\x01" + b"\0" * 12 + b"\x3e\x00"),
+                               ("ogvshrink.exe", b"MZ" + b"\0" * 58 + struct.pack("<I", 64) +
+                                b"PE\0\0" + struct.pack("<H", 0x8664))):
+                with open(os.path.join(d, name), "wb") as f:
+                    f.write(head + b"\0" * 64)
+            self.assertEqual(ypport.find_video_tool("x86_64", [d], host_os="linux"),
+                             os.path.join(d, "ogvshrink"))
+            self.assertEqual(ypport.find_video_tool("x86_64", [d], host_os="windows"),
+                             os.path.join(d, "ogvshrink.exe"))
+            self.assertIsNone(ypport.find_video_tool("aarch64", [d], host_os="linux"))
+
 
 if __name__ == "__main__":
     unittest.main()

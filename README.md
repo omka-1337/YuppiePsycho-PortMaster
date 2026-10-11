@@ -21,10 +21,11 @@ This project uses AI to write code and documentation. All code and documentation
 - [Compatibility](#compatibility)
 - [Disclaimer](#disclaimer)
 - [Installing](#installing)
-  - [1. Install the port](#1-install-the-port)
-  - [2. Prepare the game files](#2-prepare-the-game-files)
-  - [3. Copy the game across](#3-copy-the-game-across)
+  - [1. Download the port](#1-download-the-port)
+  - [2. Run the patcher](#2-run-the-patcher)
+  - [3. Copy to the handheld](#3-copy-to-the-handheld)
   - [4. Play](#4-play)
+  - [Without a PC](#without-a-pc)
 - [Memory](#memory)
 - [Cutscenes](#cutscenes)
 - [Controls](#controls)
@@ -32,57 +33,48 @@ This project uses AI to write code and documentation. All code and documentation
 
 ## Installing
 
-You need a legal copy of *Yuppie Psycho: Executive Edition* and about 5 minutes.
+You need a legal copy of *Yuppie Psycho: Executive Edition* on Steam (Linux or Windows build), a PC with [Python](https://www.python.org/downloads/) 3.6 or newer, and about 10 minutes.
 
-### 1. Install the port
+### 1. Download the port
 
-Extract `yuppiepsycho.zip` into your ports folder (`/storage/roms/ports` on ROCKNIX, or `roms/ports` on the SD card).
+Download `yuppiepsycho.zip` from the releases and unzip it on your PC. You get `YuppiePsycho.sh` and the `yuppiepsycho` folder.
 
-### 2. Prepare the game files
+### 2. Run the patcher
 
-On a PC run:
+- Windows: double-click `yuppiepsycho\patch.bat`
+- Linux, macOS: run `./patch` in the `yuppiepsycho` folder
 
-```
-python3 port/yuppiepsycho/tools/ypport.py inspect "/path/to/Yuppie Psycho"
-```
+The patcher finds the game in Steam (or asks for its folder) and copies it into `yuppiepsycho/gamedata`; the Steam installation is not changed. Pick the maker of your handheld, then the model. The patcher converts only what that model needs:
 
-It must report that the build can run natively (not NativeAOT). Typical Steam location:
+| Handheld | Textures | Cutscenes | Time on a 12-thread PC |
+|---|---|---|---|
+| 1 GB of RAM (RG35XX/RG40XX family, R36S, RG353VS, TrimUI, ...) | 16-bit | re-encoded to the screen | ~5 minutes |
+| 2 GB or more, slower CPU (RG353V, X55, RG552, ...) | as shipped | re-encoded to the screen | ~4 minutes |
+| Snapdragon, RK3588 (Retroid Pocket 5, Odin 2, ...) | as shipped | as shipped | seconds |
 
-- Linux: `~/.local/share/Steam/steamapps/common/Yuppie Psycho`
-- Windows: `C:\Program Files (x86)\Steam\steamapps/common\Yuppie Psycho`
+Not in the list? Pick "My handheld is not listed" and answer two questions (RAM and screen). `./patch --list` shows every known model and what it gets.
 
-### 3. Copy the game across
+### 3. Copy to the handheld
 
-Copy the **contents** of the game folder (the one that contains `game.dll`, `content/`, `res/`, `saves/`) into:
-
-```
-ports/yuppiepsycho/gamedata/
-```
-
-Resulting layout:
-
-```
-ports/yuppiepsycho/gamedata/
-  game.dll
-  content/
-  res/
-  saves/
-  ...
-```
+Copy `YuppiePsycho.sh` and the whole `yuppiepsycho` folder into the ports folder on the SD card (`/storage/roms/ports` on ROCKNIX, `roms/ports` on most other firmwares).
 
 ### 4. Play
 
-Launch *Yuppie Psycho* from Ports. First launch runs setup (5 to 30 minutes: textures and cutscenes are converted). Later launches start the game directly.
+Launch *Yuppie Psycho* from Ports. Logs: `ports/yuppiepsycho/log.txt`, `patchlog.txt`.
 
-Logs: `ports/yuppiepsycho/log.txt`, `patchlog.txt`.
+The game is prepared for the model you picked. If it lands on a handheld with less memory, the launcher says so instead of starting it: run the patcher again and pick that handheld. The patcher replaces its copy with a fresh one from Steam each time and keeps the saves in `gamedata/saves`.
+
+### Without a PC
+
+Copy the **contents** of the game folder (the one that contains `game.dll`, `content/`, `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/` on the SD card. The first launch then prepares it on the handheld itself, which takes 5 to 30 minutes. The handheld's own memory, CPU and screen decide what is converted.
 
 ## Memory
 
-The game ships 747 MB of RGBA texture atlases. On 1 GB devices the port converts them to 16-bit (374 MB) and uses zram + a memory watchdog. This is automatic on first launch.
+The game ships 747 MB of RGBA texture atlases. On 1 GB devices the port converts them to 16-bit (374 MB) and uses zram + a memory watchdog. The patcher does this for 1 GB models; without a PC the first launch does.
 
 ## Cutscenes
 
-The cutscenes are Theora videos, decoded on the CPU, and at HD size they stutter on these devices. On first launch the port re-encodes every video larger than the screen to fit it (640x360 on a 640x480 screen), keeping sound and timing. The originals stay in `gamedata/.ypport/backup`; `YP_VIDEOS=full` in `ports/yuppiepsycho/settings.txt` brings them back.
+The cutscenes are Theora videos, decoded on the CPU, and at HD size they stutter on these devices. The patcher (or, without a PC, the first launch) re-encodes every video larger than the screen to fit it (640x360 on a 640x480 screen), keeping sound and timing. Handhelds with a Cortex-A75 class core or faster (Snapdragon, RK3588) keep the originals; that they play them smoothly is expected from their speed, not yet measured on a device.
 
 ## Controls
 
@@ -105,4 +97,6 @@ On a Linux PC with `python3`, `git`, `curl`, `zip` and `pip install ziglang`:
 ./build.sh
 ```
 
-Produces `dist/yuppiepsycho.zip` (~33 MB) with the aarch64 .NET 8 runtime, Steam stub, Theorafile, the cutscene re-encoder and required libraries. Use `./build.sh --no-dotnet` for a smaller package that relies on PortMaster’s runtime.
+Produces `dist/yuppiepsycho.zip` (~34 MB) with the aarch64 .NET 8 runtime, Steam stub, Theorafile, the cutscene re-encoder (for the handheld and for the patcher on Linux, Windows and macOS) and required libraries. Use `./build.sh --no-dotnet` for a smaller package that relies on PortMaster’s runtime.
+
+The PC patcher is [Omka-Patcher](https://github.com/omka-1337/Omka-Patcher); `build.sh` fetches it at the tag pinned in the script. `OMKA_PATCHER_SRC=/path/to/Omka-Patcher ./build.sh` uses a local checkout instead.

@@ -13,8 +13,8 @@
     ],
     "desc": "Brian Pasternack is a young man with no future in a dystopian 90s society. His life is about to change on his first day at Sintracorp, one of the largest companies in the world. It's a strange, unsettling place, and Brian is hired for an unexpected task: to hunt the witch that haunts the building.",
     "desc_md": null,
-    "inst": "Requires Yuppie Psycho v2.5 or newer (the MonoGame engine). Copy the complete game folder from Steam (Linux build preferred, Windows build also works) into yuppiepsycho/gamedata. The first launch converts the files for ARM, which takes a minute or two.",
-    "inst_md": "- Requires **Yuppie Psycho v2.5 or newer** (the MonoGame engine).\n- Copy the **complete** game folder from Steam (Linux build preferred, Windows build also works) into `yuppiepsycho/gamedata`.\n- The first launch converts the files for ARM, which takes a minute or two.",
+    "inst": "Requires Yuppie Psycho v2.5 or newer (the MonoGame engine). Best: run the patcher on a PC (yuppiepsycho/patch.bat on Windows, ./patch on Linux and macOS) and pick your handheld; it copies the game from Steam and prepares it in a few minutes. Or copy the complete game folder from Steam (Linux build preferred, Windows build also works) into yuppiepsycho/gamedata; the first launch then converts the files on the handheld, which takes 5 to 30 minutes.",
+    "inst_md": "- Requires **Yuppie Psycho v2.5 or newer** (the MonoGame engine).\n- Best: run the patcher on a PC (`yuppiepsycho/patch.bat` on Windows, `./patch` on Linux and macOS) and pick your handheld. It copies the game from Steam and prepares it in a few minutes.\n- Or copy the **complete** game folder from Steam (Linux build preferred, Windows build also works) into `yuppiepsycho/gamedata`; the first launch then converts the files on the handheld (5 to 30 minutes).",
     "genres": [
       "adventure",
       "horror"

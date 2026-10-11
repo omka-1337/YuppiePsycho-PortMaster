@@ -1,7 +1,10 @@
 #!/bin/bash
 # Build ogvshrink, the cutscene re-encoder the first-run setup uses.
-#   src/ogvshrink/build.sh OUTDIR [ARCH...]     (ARCH: aarch64 x86_64; default aarch64)
+#   src/ogvshrink/build.sh OUTDIR [TARGET...]   (default aarch64)
 #
+# TARGET is aarch64 or x86_64 for Linux (the handheld, tests), or one of the
+# PC platforms the patcher runs on: windows-x86_64, macos-x86_64, macos-aarch64.
+# The PC targets need zig.
 # Decoding uses the libtheora copy inside Theorafile (the same code, NEON
 # included, that plays the videos in the game); encoding uses the encoder of
 # libtheora 1.2.0, which Theorafile leaves out. The two trees only differ in
@@ -35,13 +38,21 @@ fetch() { # repo commit dir probe
 fetch "$THEORAFILE_REPO" "$THEORAFILE_COMMIT" "$TF" theorafile.c
 fetch "$LIBTHEORA_REPO" "$LIBTHEORA_COMMIT" "$LT" lib/encode.c
 
-if [ -n "${CC:-}" ]; then
-  cc_for() { echo "$CC"; }
-elif command -v zig > /dev/null; then
-  cc_for() { echo "zig cc -target $1-linux-gnu.2.17"; }
-else
-  cc_for() { echo "python3 -m ziglang cc -target $1-linux-gnu.2.17"; }
-fi
+if command -v zig > /dev/null; then ZIG="zig"; else ZIG="python3 -m ziglang"; fi
+zig_target() {
+  case "$1" in
+    windows-x86_64) echo x86_64-windows-gnu ;;
+    macos-x86_64) echo x86_64-macos ;;
+    macos-aarch64) echo aarch64-macos ;;
+    *) echo "$1-linux-gnu.2.17" ;;
+  esac
+}
+cc_for() {
+  case "$1" in
+    aarch64|x86_64) [ -n "${CC:-}" ] && { echo "$CC"; return; } ;;
+  esac
+  echo "$ZIG cc -target $(zig_target "$1")"
+}
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -67,19 +78,24 @@ for f in "${ENC[@]}"; do SRCS+=("lib/theora/$f"); done
 
 for arch in "${ARCHS[@]}"; do
   cc="$(cc_for "$arch")"
+  exe="$NAME"
   case "$arch" in
-    aarch64)
+    aarch64|macos-aarch64)
       defs=(-DOC_ARM_ASM -DOC_ARM_ASM_EDSP -DOC_ARM_ASM_MEDIA -DOC_ARM_ASM_NEON)
       extra=(lib/theora/arm-intrinsics/armcpu.c lib/theora/arm-intrinsics/armfrag.c
              lib/theora/arm-intrinsics/armidct.c lib/theora/arm-intrinsics/armloop.c
              lib/theora/arm-intrinsics/armstate.c) ;;
-    x86_64)
+    x86_64|macos-x86_64)
       defs=()
       extra=() ;;
+    windows-x86_64)
+      defs=()
+      extra=()
+      exe="$NAME.exe" ;;
     *) echo "unsupported arch $arch"; exit 1 ;;
   esac
   mkdir -p "$OUT/$arch"
-  (cd "$WORK" && $cc -O3 -s -w "${defs[@]}" -Ilib -Ilib/theora -o "$OUT/$arch/$NAME" \
+  (cd "$WORK" && $cc -O3 -s -w "${defs[@]}" -Ilib -Ilib/theora -o "$OUT/$arch/$exe" \
       "$PROGRAM" "${SRCS[@]}" "${extra[@]}" -lm)
-  echo "built $OUT/$arch/$NAME"
+  echo "built $OUT/$arch/$exe"
 done

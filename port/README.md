@@ -19,17 +19,26 @@ before v2.5 must be converted by running the game once on the PC.
    as long as it is a MonoGame DesktopGL build (the setup checks this).
    - The Linux build can be taken from a Linux PC or a Steam Deck, or downloaded on any PC with
      SteamCMD: `steamcmd +@sSteamCmdForcePlatformType linux +login <user> +app_update 597760 validate +quit`
-2. Copy the **contents** of the game's install folder (the folder with `game.dll`, `content/`,
-   `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/`, so that the file
-   `ports/yuppiepsycho/gamedata/game.dll` exists.
-3. Start *Yuppie Psycho* from the Ports menu. The first launch prepares the files for ARM
-   (sets aside the x86_64 .NET runtime and libraries and puts aarch64 ones in their place),
-   stores the texture atlases as 16-bit on 1 GB devices and re-encodes the cutscenes to the
-   screen size. This takes 5 to 30 minutes and only happens again when the game files or these
-   settings change.
+2. On a PC (recommended): unzip the port there and run the patcher, `yuppiepsycho/patch.bat`
+   on Windows or `./patch` in `yuppiepsycho/` on Linux and macOS (needs Python 3.6+). It copies
+   the game from Steam into `yuppiepsycho/gamedata` and prepares it for the handheld you pick
+   (maker, then model) in a few minutes. Then copy `YuppiePsycho.sh` and the `yuppiepsycho`
+   folder into the ports folder on the SD card.
 
-The original files that the setup sets aside are kept in `gamedata/.ypport/backup`; nothing is
-deleted.
+   Without a PC: copy the **contents** of the game's install folder (the folder with
+   `game.dll`, `content/`, `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/`, so that the
+   file `ports/yuppiepsycho/gamedata/game.dll` exists.
+3. Start *Yuppie Psycho* from the Ports menu. A game prepared by the patcher starts directly.
+   Otherwise the first launch prepares the files for ARM (sets aside the x86_64 .NET runtime
+   and libraries and puts aarch64 ones in their place), stores the texture atlases as 16-bit on
+   1 GB devices and re-encodes the cutscenes to the screen size. This takes 5 to 30 minutes and
+   only happens again when the game files or these settings change.
+
+On the handheld, the original files that the setup sets aside are kept in
+`gamedata/.ypport/backup`; nothing is deleted. The patcher keeps no such copy (the original is
+in Steam): to prepare for another handheld, run it again. A game prepared for a handheld with
+more memory does not start on one with less; the launcher asks for the patcher to be run
+again.
 
 ## Options
 
@@ -53,7 +62,8 @@ YP_GC_HEAP_LIMIT_MB=
 # setup on the next launch.
 YP_TEXTURES=16bit
 # Cutscenes larger than this are re-encoded to fit it (default: the screen size, at most
-# 960x540); full = keep the original videos. Changing it re-runs the setup.
+# 960x540; full on chips with a Cortex-A75 class core such as Snapdragon and RK3588);
+# full = keep the original videos. Changing it re-runs the setup.
 YP_VIDEOS=640x480
 ```
 

@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import posixpath
 import re
 import shutil
@@ -300,7 +301,7 @@ class Bundle(object):
             with open(tmp, "wb") as out:
                 for data in self.iter_chunks(e):
                     out.write(data)
-            os.rename(tmp, dest)
+            os.replace(tmp, dest)
             written.append(e.path)
             if log:
                 log("  extracted %s (%s)" % (e.path, human(e.size)))
@@ -2069,22 +2070,41 @@ def find_videos(root):
 
 
 def _host_arch():
-    machine = os.uname()[4].lower()
-    return {"arm64": "aarch64", "amd64": "x86_64"}.get(machine, machine)
+    machine = platform.machine().lower()
+    return {"arm64": "aarch64", "amd64": "x86_64", "x64": "x86_64"}.get(machine, machine)
 
 
-def find_video_tool(arch, dirs=()):
+def _host_os():
+    return {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
+
+
+# Executable format of each OS the video tool is built for.
+HOST_BINARY_FORMATS = {"linux": "elf", "windows": "pe", "macos": "macho"}
+
+
+def find_video_tool(arch, dirs=(), host_os="linux"):
+    """ogvshrink for `arch` on `host_os`: the handheld's copy lives in
+    bin.<arch>/ (Linux), the PC patcher's in bin.<os>-<arch>/."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for d in list(dirs) + [os.path.join(here, "bin." + arch)]:
-        path = os.path.join(d, VIDEO_TOOL)
-        if os.path.isfile(path) and sniff(path) == ("elf", arch):
-            if not os.access(path, os.X_OK):
+    name = VIDEO_TOOL + (".exe" if host_os == "windows" else "")
+    candidates = list(dirs) + [os.path.join(here, "bin.%s-%s" % (host_os, arch))]
+    if host_os == "linux":
+        candidates.append(os.path.join(here, "bin." + arch))
+    for d in candidates:
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and sniff(path) == (HOST_BINARY_FORMATS[host_os], arch):
+            if host_os != "windows" and not os.access(path, os.X_OK):
                 try:
                     os.chmod(path, 0o755)
                 except OSError:
                     pass
             return path
     return None
+
+
+def find_host_video_tool():
+    """ogvshrink for the machine this script runs on."""
+    return find_video_tool(_host_arch(), host_os=_host_os())
 
 
 def parse_tool_output(text):
@@ -2189,8 +2209,13 @@ class PrepareError(Exception):
 class Preparer(object):
     def __init__(self, gamedir, framework_dir=None, log=print, dry_run=False, native_dirs=(),
                  native_arch="aarch64", textures="full", videos="full", video_tool=None,
-                 video_quality=44, jobs=None):
+                 video_quality=44, jobs=None, device=None, backup=True):
         self.root = os.path.abspath(gamedir)
+        self.device = device  # the handheld the PC patcher prepared for, if any
+        # Keep the original of every file prepare replaces, for `restore`. The
+        # PC patcher works on a copy (the original is in Steam) and turns it
+        # off, so the SD card does not carry the originals.
+        self.backup = backup
         self.textures = textures
         self.videos = videos
         self.video_tool = video_tool
@@ -2204,24 +2229,41 @@ class Preparer(object):
         self.log = log
         self.dry_run = dry_run
         self.state = {"version": VERSION, "extracted": [], "moved": [], "rewritten": [],
-                      "created": []}
+                      "created": [], "backup": backup}
 
     def _abs(self, rel):
         return os.path.join(self.root, *rel.split("/")) if rel and rel != "." else self.root
 
-    # -- file operations that can be undone --------------------------------
-    def _park(self, rel, reason):
-        if rel in self.state["moved"] or not os.path.exists(self._abs(rel)):
+    # -- file operations that can be undone (with a backup) -------------------
+    def _set_aside(self, rel):
+        """Move a file prepare replaces or no longer needs into the backup,
+        or delete it when there is no backup."""
+        if not self.backup:
+            os.remove(self._abs(rel))
             return
         dst = os.path.join(self.backup_dir, *rel.split("/"))
-        self.log("  park %-56s (%s)" % (rel, reason))
-        if self.dry_run:
-            return
         if not os.path.isdir(os.path.dirname(dst)):
             os.makedirs(os.path.dirname(dst))
         if os.path.exists(dst):
             os.remove(dst)
         shutil.move(self._abs(rel), dst)
+
+    def _back_up(self, rel):
+        """Copy a file prepare is about to rewrite into the backup."""
+        if self.backup:
+            bak = os.path.join(self.backup_dir, *rel.split("/"))
+            if not os.path.isdir(os.path.dirname(bak)):
+                os.makedirs(os.path.dirname(bak))
+            shutil.copy2(self._abs(rel), bak)
+        self.state["rewritten"].append(rel)
+
+    def _park(self, rel, reason):
+        if rel in self.state["moved"] or not os.path.exists(self._abs(rel)):
+            return
+        self.log("  %s %-56s (%s)" % ("park" if self.backup else "drop", rel, reason))
+        if self.dry_run:
+            return
+        self._set_aside(rel)
         self.state["moved"].append(rel)
         self._save_state()
 
@@ -2231,16 +2273,12 @@ class Preparer(object):
             self.log("  would rewrite %s" % rel)
             return
         if os.path.exists(path) and rel not in self.state["rewritten"] and rel not in self.state["created"]:
-            bak = os.path.join(self.backup_dir, *rel.split("/"))
-            if not os.path.isdir(os.path.dirname(bak)):
-                os.makedirs(os.path.dirname(bak))
-            shutil.copy2(path, bak)
-            self.state["rewritten"].append(rel)
+            self._back_up(rel)
         elif not os.path.exists(path):
             self.state["created"].append(rel)
-        with open(path + ".yptmp", "w") as f:
+        with open(path + ".yptmp", "w", encoding="utf-8", newline="\n") as f:
             f.write(data)
-        os.rename(path + ".yptmp", path)
+        os.replace(path + ".yptmp", path)
         self._save_state()
         self.log("  wrote %s" % rel)
 
@@ -2250,14 +2288,15 @@ class Preparer(object):
         if not os.path.isdir(self.state_dir):
             os.makedirs(self.state_dir)
         tmp = os.path.join(self.state_dir, "state.json.yptmp")
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             json.dump(self.state, f, indent=1, sort_keys=True)
-        os.rename(tmp, os.path.join(self.state_dir, "state.json"))
+        os.replace(tmp, os.path.join(self.state_dir, "state.json"))
 
     def _write_state_file(self, name, text):
         if self.dry_run:
             return
-        with open(os.path.join(self.state_dir, name), "w") as f:
+        # newline: written on a Windows PC by the patcher, read by bash on the device.
+        with open(os.path.join(self.state_dir, name), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
 
     # -- main entry --------------------------------------------------------
@@ -2321,6 +2360,7 @@ class Preparer(object):
             "YP_PREPARED_BY": "ypport %s" % VERSION,
             "YP_TEXTURES": self.textures,
             "YP_VIDEOS": self.videos,
+            "YP_PREPARED_FOR": self.device or "",
         })
         lines = ["# generated by ypport.py prepare - do not edit"]
         for k in sorted(env):
@@ -2328,6 +2368,9 @@ class Preparer(object):
         self.state["main"] = main
         self.state["textures"] = self.textures
         self.state["videos"] = self.videos
+        if self.device:
+            self.state["device"] = self.device
+        self.state["fingerprint_kind"] = FINGERPRINT_KIND
         self.state["fingerprint"] = fingerprint(self.root, self.state)
         self._write_state_file("launch.env", "\n".join(lines) + "\n")
         self._write_state_file("inspect.json", json.dumps(report, indent=1, default=_json_default))
@@ -2576,14 +2619,9 @@ class Preparer(object):
                      info.get("src_decode_p95_ms", "?"), info.get("out_decode_p95_ms", "?"), budget, elapsed))
         # The original goes to the backup folder (a rename, not a copy: videos
         # are big) and the new file takes its place.
-        dst = os.path.join(self.backup_dir, *rel.split("/"))
-        if not os.path.isdir(os.path.dirname(dst)):
-            os.makedirs(os.path.dirname(dst))
-        if os.path.exists(dst):
-            os.remove(dst)
-        shutil.move(self._abs(rel), dst)
+        self._set_aside(rel)
         self.state["moved"].append(rel)
-        os.rename(tmp, self._abs(rel))
+        os.replace(tmp, self._abs(rel))
         self.state["created"].append(rel)
         self._save_state()
 
@@ -2645,14 +2683,10 @@ class Preparer(object):
         if self.dry_run:
             return
         if rel not in self.state["rewritten"] and rel not in self.state["created"]:
-            bak = os.path.join(self.backup_dir, *rel.split("/"))
-            if not os.path.isdir(os.path.dirname(bak)):
-                os.makedirs(os.path.dirname(bak))
-            shutil.copy2(path, bak)
-            self.state["rewritten"].append(rel)
+            self._back_up(rel)
         with open(path + ".yptmp", "wb") as f:
             f.write(data)
-        os.rename(path + ".yptmp", path)
+        os.replace(path + ".yptmp", path)
         self._save_state()
 
     # -- natives -------------------------------------------------------------
@@ -2740,23 +2774,44 @@ def unpin_dllmaps(text):
     return re.sub(r"<dllmap\b[^>]*>", fix, text)
 
 
+FINGERPRINT_KIND = 2
+
+
 def fingerprint(root, state):
     """Changes when the user copies a different (or the same) game build over
-    a prepared folder: every file prepare touched is part of it."""
+    a prepared folder: every file prepare touched is part of it.
+
+    Kind 2 (current) uses sizes and the main assembly's content: a folder
+    prepared on a PC is copied to the SD card, which does not keep
+    modification times (cp without -p, FAT's 2 s resolution). Copying the
+    game over it again still shows: parked files reappear, rewritten ones
+    change size, and the main assembly is retargeted. Kind 1 (states written
+    before) also used modification times."""
+    kind = state.get("fingerprint_kind", 1)
     h = hashlib.sha1()
     paths = [state["main"]] + sorted(set(state.get("moved", []) + state.get("created", []) +
                                          state.get("rewritten", [])))
     for rel in paths:
+        path = os.path.join(root, *rel.split("/"))
         try:
-            st = os.stat(os.path.join(root, *rel.split("/")))
-            h.update(("%s:%d:%d\n" % (rel, st.st_size, int(st.st_mtime))).encode())
+            st = os.stat(path)
+            if kind == 1:
+                h.update(("%s:%d:%d\n" % (rel, st.st_size, int(st.st_mtime))).encode())
+            else:
+                h.update(("%s:%d\n" % (rel, st.st_size)).encode())
         except OSError:
             h.update(("%s:-\n" % rel).encode())
+    if kind != 1:
+        try:
+            with open(os.path.join(root, *state["main"].split("/")), "rb") as f:
+                h.update(hashlib.sha1(f.read()).hexdigest().encode())
+        except (IOError, OSError):
+            h.update(b"main:-\n")
     return h.hexdigest()
 
 
 def _load_state(root):
-    with open(os.path.join(root, STATE_DIR, "state.json")) as f:
+    with open(os.path.join(root, STATE_DIR, "state.json"), encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -2766,6 +2821,10 @@ def restore(gamedir, log=print):
     if not os.path.exists(os.path.join(state_dir, "state.json")):
         raise PrepareError("nothing to restore (no %s/state.json)" % STATE_DIR)
     state = _load_state(root)
+    if state.get("backup") is False:
+        raise PrepareError("prepared%s without a copy of the original files (by the PC patcher); "
+                           "copy the game again instead" % (
+                               " for the " + state["device"] if state.get("device") else ""))
     backup = os.path.join(state_dir, "backup")
     for rel in state.get("rewritten", []):
         src = os.path.join(backup, *rel.split("/"))
@@ -2814,11 +2873,11 @@ def reset(gamedir, log=print):
 STATUS_OK, STATUS_NOT_PREPARED, STATUS_OUTDATED = 0, 1, 2
 
 
-def prepared_status(gamedir, textures=None, videos=None):
+def prepared_status(gamedir, textures=None, videos=None, textures_max=None):
     """STATUS_OK: prepared by this version and unchanged since.
     STATUS_OUTDATED: prepared by another version of this tool, or with
-    another texture or video mode than `textures`/`videos`; `restore` and
-    prepare again.
+    another texture or video mode than `textures`/`videos`, or with textures
+    that need more memory than `textures_max`; `restore` and prepare again.
     STATUS_NOT_PREPARED: never prepared, or the game files were copied again
     since (use `reset`)."""
     root = os.path.abspath(gamedir)
@@ -2834,11 +2893,18 @@ def prepared_status(gamedir, textures=None, videos=None):
         return STATUS_OUTDATED
     if videos is not None and state.get("videos", "full") != videos:
         return STATUS_OUTDATED
+    if textures_max is not None and \
+            TEXTURE_MEMORY_RANK[state.get("textures", "full")] > TEXTURE_MEMORY_RANK[textures_max]:
+        return STATUS_OUTDATED
     return STATUS_OK
 
 
 def is_prepared(gamedir):
     return prepared_status(gamedir) == STATUS_OK
+
+
+# Texture modes by the memory their atlases take (status --textures-max).
+TEXTURE_MEMORY_RANK = {"16bit": 0, "auto16": 1, "full": 2}
 
 
 # --------------------------------------------------------------------------
@@ -2910,6 +2976,10 @@ def main(argv=None):
                                         "bin.<arch>/ next to this script)" % VIDEO_TOOL)
     p.add_argument("--video-quality", type=int, default=44, help="Theora quality 0-63 (default 44)")
     p.add_argument("--jobs", type=int, help="videos encoded at a time (default: CPU cores, at most 4)")
+    p.add_argument("--device", help="name of the handheld the files are prepared for (recorded only)")
+    p.add_argument("--no-backup", action="store_true",
+                   help="delete replaced files instead of keeping them for `restore` "
+                        "(for a copy of the game whose original is kept elsewhere)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true", help="restore first if already prepared")
 
@@ -2923,6 +2993,8 @@ def main(argv=None):
                                       "version of this tool or texture/video mode, 1 otherwise")
     p.add_argument("dir")
     p.add_argument("--textures", choices=TEXTURE_MODES)
+    p.add_argument("--textures-max", choices=TEXTURE_MODES,
+                   help="accept any texture mode that needs no more memory than this one")
     p.add_argument("--videos", type=video_mode)
 
     args = ap.parse_args(argv)
@@ -2947,7 +3019,7 @@ def main(argv=None):
         videos = find_videos(root)
         bench = None
         if args.bench:
-            tool = args.tool or find_video_tool(_host_arch())
+            tool = args.tool or find_host_video_tool()
             if tool is None:
                 print("no %s for this machine; pass --tool" % VIDEO_TOOL)
                 return 1
@@ -3013,7 +3085,8 @@ def main(argv=None):
             Preparer(args.dir, framework_dir=args.framework_dir, dry_run=args.dry_run,
                      native_dirs=args.native_dir, native_arch=args.native_arch,
                      textures=args.textures, videos=args.videos, video_tool=args.video_tool,
-                     video_quality=args.video_quality, jobs=args.jobs).run(app_name=args.app)
+                     video_quality=args.video_quality, jobs=args.jobs,
+                     device=args.device, backup=not args.no_backup).run(app_name=args.app)
         except (PrepareError, BundleError) as e:
             print("ERROR: %s" % e)
             return 3
@@ -3030,7 +3103,8 @@ def main(argv=None):
         reset(args.dir)
         return 0
     if args.cmd == "status":
-        return prepared_status(args.dir, textures=args.textures, videos=args.videos)
+        return prepared_status(args.dir, textures=args.textures, videos=args.videos,
+                               textures_max=args.textures_max)
     ap.print_help()
     return 1
 
