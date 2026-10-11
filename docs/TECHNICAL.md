@@ -190,7 +190,8 @@ entry points used by Steamworks.NET 15.0.1 / 20.1.0 / 20.2.0 / 2024.8.0 and Face
 ## PC patcher
 
 The patcher is [Omka-Patcher](https://github.com/omka-1337/Omka-Patcher), shared with other
-ports and fetched by `build.sh` at a pinned tag: `patch`, `patch.bat`, `tools/omkapatcher.py`
+ports and taken by `build.sh` from its latest `main` (`OMKA_PATCHER_REF` picks a tag or
+commit; the commit used is in `tools/omkapatcher.commit` and in `patchlog.txt`): `patch`, `patch.bat`, `tools/omkapatcher.py`
 and `tools/devices.json` in the package. It provides the terminal UI, the handheld list (maker,
 model, chip, RAM, screen), finding the game in Steam and copying it into `gamedata` (saves
 kept). What the game needs is in this port's recipe, `tools/recipe.py`:
@@ -213,7 +214,7 @@ with more memory is refused (status 2, `restore` impossible without a backup) wi
 to run the patcher again.
 
 To work on the patcher and the port together, point `OMKA_PATCHER_SRC` at an Omka-Patcher
-checkout: `build.sh` takes it from there instead of the pinned tag, and `tests/test_recipe.py`
+checkout: `build.sh` takes it from there instead of GitHub, and `tests/test_recipe.py`
 looks for it in `OMKA_PATCHER_SRC`, `../../Omka-Patcher` and `build/omka-patcher`.
 
 ## Memory on 1 GB devices

@@ -4,12 +4,14 @@ Thanks to [Baroque Decay](https://store.steampowered.com/app/597760/Yuppie_Psych
 
 **Playable.** Boots, plays, saves and loads on ROCKNIX (Anbernic RG40XX H). Native aarch64 port of the MonoGame/.NET game. You supply your own game files.
 
+> [!IMPORTANT]
+This is a paid title. To play this port, you must have a legally purchased copy of the game on [Steam](https://store.steampowered.com/app/597760/Yuppie_Psycho_Executive_Edition/).
+
 ## Compatibility
 
-| Model | [AmberELEC](https://github.com/AmberELEC) | [dArkOS](https://github.com/christianhaitian/dArkOS) | [MuOS](https://github.com/MustardOS) | [ROCKNIX](https://github.com/ROCKNIX) | [KNULLI](https://github.com/knulli-cfw) |
-|---|---|---|---|---|---|
-| RG40XX H/V | ❔ | ❔ | ❔ | ✅ | ❔ |
-| R36S | ❔ | ❔ | ❔ | ❔ | ❔ |
+| [AmberELEC](https://github.com/AmberELEC) | [dArkOS](https://github.com/christianhaitian/dArkOS) | [MuOS](https://github.com/MustardOS) | [ROCKNIX](https://github.com/ROCKNIX) | [KNULLI](https://github.com/knulli-cfw) |
+|---|---|---|---|---|
+| ❔ | ❔ | ❔ | ✅ | ❔ |
 
 ## Disclaimer
 
@@ -21,11 +23,10 @@ This project uses AI to write code and documentation. All code and documentation
 - [Compatibility](#compatibility)
 - [Disclaimer](#disclaimer)
 - [Installing](#installing)
-  - [1. Download the port](#1-download-the-port)
-  - [2. Run the patcher](#2-run-the-patcher)
-  - [3. Copy to the handheld](#3-copy-to-the-handheld)
-  - [4. Play](#4-play)
-  - [Without a PC](#without-a-pc)
+  - [From GitHub](#from-github)
+    - [1. Dwnload port](#1-download-port)
+    - [2. Prepare the game](#2-prepare-the-game)
+    - [3. Run the game](#3-run-the-game)
 - [Memory](#memory)
 - [Cutscenes](#cutscenes)
 - [Controls](#controls)
@@ -33,40 +34,24 @@ This project uses AI to write code and documentation. All code and documentation
 
 ## Installing
 
-You need a legal copy of *Yuppie Psycho: Executive Edition* on Steam (Linux or Windows build), a PC with [Python](https://www.python.org/downloads/) 3.6 or newer, and about 10 minutes.
+### From GitHub
 
-### 1. Download the port
+#### 1. Download port
 
-Download `yuppiepsycho.zip` from the releases and unzip it on your PC. You get `YuppiePsycho.sh` and the `yuppiepsycho` folder.
+You can download the port from [releases](https://github.com/omka-1337/YuppiePsycho-PortMaster/releases).
 
-### 2. Run the patcher
+#### 2. Prepare the game
 
-- Windows: double-click `yuppiepsycho\patch.bat`
-- Linux, macOS: run `./patch` in the `yuppiepsycho` folder
+Optional
+Unpack archive, and run patcher.bat or patcher (if you on linux or MacOS), if necessary, specify the path to the game folder, select the manufacturer and model of your device, and run the patch.
 
-The patcher finds the game in Steam (or asks for its folder) and copies it into `yuppiepsycho/gamedata`; the Steam installation is not changed. Pick the maker of your handheld, then the model. The patcher converts only what that model needs:
+Copy `yuppiepsycho` and `Yuppie Psycho.sh` into /roms/ports.
 
-| Handheld | Textures | Cutscenes | Time on a 12-thread PC |
-|---|---|---|---|
-| 1 GB of RAM (RG35XX/RG40XX family, R36S, RG353VS, TrimUI, ...) | 16-bit | re-encoded to the screen | ~5 minutes |
-| 2 GB or more, slower CPU (RG353V, X55, RG552, ...) | as shipped | re-encoded to the screen | ~4 minutes |
-| Snapdragon, RK3588 (Retroid Pocket 5, Odin 2, ...) | as shipped | as shipped | seconds |
+Copy the contents of the game folder to `/roms/ports/yuppiepsycho/gamedata`. 
 
-Not in the list? Pick "My handheld is not listed" and answer two questions (RAM and screen). `./patch --list` shows every known model and what it gets.
+#### 3. Run the game
 
-### 3. Copy to the handheld
-
-Copy `YuppiePsycho.sh` and the whole `yuppiepsycho` folder into the ports folder on the SD card (`/storage/roms/ports` on ROCKNIX, `roms/ports` on most other firmwares).
-
-### 4. Play
-
-Launch *Yuppie Psycho* from Ports. Logs: `ports/yuppiepsycho/log.txt`, `patchlog.txt`.
-
-The game is prepared for the model you picked. If it lands on a handheld with less memory, the launcher says so instead of starting it: run the patcher again and pick that handheld. The patcher replaces its copy with a fresh one from Steam each time and keeps the saves in `gamedata/saves`.
-
-### Without a PC
-
-Copy the **contents** of the game folder (the one that contains `game.dll`, `content/`, `res/`, `saves/`) into `ports/yuppiepsycho/gamedata/` on the SD card. The first launch then prepares it on the handheld itself, which takes 5 to 30 minutes. The handheld's own memory, CPU and screen decide what is converted.
+If you haven't patched the game on your computer, the patcher will run the first time you launch the game and, depending on the version, will apply the appropriate patches to the game.
 
 ## Memory
 

@@ -40,13 +40,12 @@ DEPS=(
   "celeste64/celeste64/libfmod.so 440556e5948d78dc60d08267afd8031065fe435a572bdb85954dafec2bd05ba3 libs.aarch64/libfmod.so libs.aarch64/libfmod.so.13"
 )
 
-# Omka-Patcher, the engine of the PC patcher (`patch`, `patch.bat`). The tag
-# is checked against the commit id, which pins the content (an archive's
-# sha256 is not stable on GitHub). OMKA_PATCHER_SRC=/path/to/checkout uses a
-# local copy instead, for working on both at once.
+# Omka-Patcher, the engine of the PC patcher (`patch`, `patch.bat`), taken from
+# its sources: the latest main, or OMKA_PATCHER_REF=<tag or commit> to rebuild an
+# older package. OMKA_PATCHER_SRC=/path/to/checkout uses a local copy, for working
+# on both at once. The commit used is recorded in the package
+# (tools/omkapatcher.commit, NOTICE.txt) and in every patch log.
 OMKA_PATCHER_REPO=https://github.com/omka-1337/Omka-Patcher.git
-OMKA_PATCHER_TAG=""
-OMKA_PATCHER_COMMIT=""
 
 # .NET runtime for linux-arm64 from nuget.org (packages there are immutable)
 DOTNET_VERSION=8.0.31
@@ -136,27 +135,26 @@ cp "$REPO/build/libtheora-src/COPYING" "$PORT/licenses/libtheora-COPYING.txt"
 echo "== Omka-Patcher"
 if [ -n "${OMKA_PATCHER_SRC:-}" ]; then
   OP="$(cd "$OMKA_PATCHER_SRC" && pwd)"
-  echo "  local copy $OP"
+  OP_COMMIT="$(git -C "$OP" rev-parse HEAD 2> /dev/null || echo unknown)"
+  [ -n "$(git -C "$OP" status --porcelain 2> /dev/null)" ] && OP_COMMIT="$OP_COMMIT-dirty"
+  echo "  local copy $OP ($OP_COMMIT)"
 else
-  if [ -z "$OMKA_PATCHER_TAG" ] || [ -z "$OMKA_PATCHER_COMMIT" ]; then
-    echo "OMKA_PATCHER_TAG/OMKA_PATCHER_COMMIT are not set in build.sh; set them, or point"
-    echo "OMKA_PATCHER_SRC at an Omka-Patcher checkout."
-    exit 1
-  fi
+  ref="${OMKA_PATCHER_REF:-main}"
   OP="$REPO/build/omka-patcher"
   [ -d "$OP/.git" ] || git clone -q "$OMKA_PATCHER_REPO" "$OP"
-  git -C "$OP" fetch -q --tags origin
-  got="$(git -C "$OP" rev-parse "$OMKA_PATCHER_TAG^{commit}")"
-  if [ "$got" != "$OMKA_PATCHER_COMMIT" ]; then
-    echo "Omka-Patcher $OMKA_PATCHER_TAG is $got, expected $OMKA_PATCHER_COMMIT"
-    exit 1
+  git -C "$OP" fetch -q --tags --force origin
+  # a branch is taken as on GitHub, a tag or commit as it is
+  if git -C "$OP" rev-parse -q --verify "origin/$ref^{commit}" > /dev/null; then
+    ref="origin/$ref"
   fi
-  git -C "$OP" checkout -q "$OMKA_PATCHER_COMMIT"
-  echo "  $OMKA_PATCHER_TAG ($OMKA_PATCHER_COMMIT)"
+  git -C "$OP" checkout -q --detach "$ref"
+  OP_COMMIT="$(git -C "$OP" rev-parse HEAD)"
+  echo "  ${OMKA_PATCHER_REF:-main} ($OP_COMMIT)"
 fi
 cp "$OP/omkapatcher.py" "$OP/devices.json" "$PORT/tools/"
 cp "$OP/patch" "$OP/patch.bat" "$PORT/"
 cp "$OP/LICENSE" "$PORT/licenses/LICENSE.omka-patcher.txt"
+echo "$OP_COMMIT" > "$PORT/tools/omkapatcher.commit"
 
 echo "== licenses"
 cp "$REPO/LICENSE" "$PORT/licenses/LICENSE.port.txt"
@@ -191,9 +189,11 @@ tools/recipe.py
 
 Omka-Patcher (tools/omkapatcher.py, tools/devices.json, patch, patch.bat) - MIT,
   see LICENSE.omka-patcher.txt. https://github.com/omka-1337/Omka-Patcher
+  commit OMKA_PATCHER_COMMIT
 
 The game itself is not included. Yuppie Psycho (c) Baroque Decay.
 EOF
+sed -i "s/OMKA_PATCHER_COMMIT/$OP_COMMIT/" "$PORT/licenses/NOTICE.txt"
 
 echo "== zip"
 chmod 0755 "$STAGE/YuppiePsycho.sh" "$PORT/tools/ypport.py" "$PORT/tools/patchscript" "$PORT/tools/memwatch.sh" \
