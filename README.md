@@ -4,12 +4,14 @@ Thanks to [Baroque Decay](https://store.steampowered.com/app/597760/Yuppie_Psych
 
 **Playable.** Boots, plays, saves and loads on ROCKNIX (Anbernic RG40XX H). Native aarch64 port of the MonoGame/.NET game. You supply your own game files.
 
+> [!IMPORTANT]
+This is a paid title. To play this port, you must have a legally purchased copy of the game on [Steam](https://store.steampowered.com/app/597760/Yuppie_Psycho_Executive_Edition/).
+
 ## Compatibility
 
-| Model | [AmberELEC](https://github.com/AmberELEC) | [dArkOS](https://github.com/christianhaitian/dArkOS) | [MuOS](https://github.com/MustardOS) | [ROCKNIX](https://github.com/ROCKNIX) | [KNULLI](https://github.com/knulli-cfw) |
-|---|---|---|---|---|---|
-| RG40XX H/V | ❔ | ❔ | ❔ | ✅ | ❔ |
-| R36S | ❔ | ❔ | ❔ | ❔ | ❔ |
+| [AmberELEC](https://github.com/AmberELEC) | [dArkOS](https://github.com/christianhaitian/dArkOS) | [MuOS](https://github.com/MustardOS) | [ROCKNIX](https://github.com/ROCKNIX) | [KNULLI](https://github.com/knulli-cfw) |
+|---|---|---|---|---|
+| ❔ | ❔ | ❔ | ✅ | ❔ |
 
 ## Disclaimer
 
@@ -35,9 +37,7 @@ This project uses AI to write code and documentation. All code and documentation
 
 You need a legal copy of *Yuppie Psycho: Executive Edition* on Steam (Linux or Windows build), a PC with [Python](https://www.python.org/downloads/) 3.6 or newer, and about 10 minutes.
 
-### 1. Download the port
-
-Download `yuppiepsycho.zip` from the releases and unzip it on your PC. You get `YuppiePsycho.sh` and the `yuppiepsycho` folder.
+## 1. Download the port
 
 ### 2. Run the patcher
 
