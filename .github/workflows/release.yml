@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's system Python refuses pip installs (PEP 668); this one does not.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install zig
+        run: python3 -m pip install ziglang==0.16.0
+
+      # The .NET runtime and PortMaster-New libraries, checked by sha256 in build.sh.
+      - uses: actions/cache@v4
+        with:
+          path: build/cache
+          key: downloads-${{ hashFiles('build.sh') }}
+
+      - name: Build the port archive
+        run: ./build.sh
+
+      - name: Run the tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Check the archive carries no game files
+        run: |
+          if python3 -c "
+          import sys, zipfile
+          bad = [n for n in zipfile.ZipFile('dist/yuppiepsycho.zip').namelist()
+                 if (n.startswith('yuppiepsycho/gamedata/') and n not in ('yuppiepsycho/gamedata/', 'yuppiepsycho/gamedata/.gitkeep'))
+                 or n.endswith(('game.dll', '.xnb', '.ogv', '.bank'))
+                 or '/content/' in n or '/res/' in n]
+          print('\n'.join(bad))
+          sys.exit(1 if bad else 0)
+          "; then
+            echo "Clean: port only."
+          else
+            echo "::error::Game files found in the archive, refusing to publish."
+            exit 1
+          fi
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          patcher="$(cat build/stage/yuppiepsycho/tools/omkapatcher.commit)"
+          gh release create "${GITHUB_REF_NAME}" dist/yuppiepsycho.zip dist/yuppiepsycho.zip.sha256 \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "PortMaster port of Yuppie Psycho: Executive Edition. Native aarch64: the game's own .NET code runs on a bundled .NET 8 runtime, no x86 emulation.
+
+          This archive is the port only. Yuppie Psycho is a paid title, so you supply your own copy of the game (Steam, Linux or Windows build, v2.5 or newer).
+
+          Unzip it on a PC and run the patcher (patch.bat on Windows, ./patch in the yuppiepsycho folder on Linux and macOS, Python 3.6+ needed). It finds the game in Steam and prepares it for the handheld you pick; then copy YuppiePsycho.sh and the yuppiepsycho folder into the ports folder on the SD card. Without a PC, copy the game files into yuppiepsycho/gamedata and the first launch prepares them on the handheld (5 to 30 minutes). See the README for details.
+
+          Built with Omka-Patcher ${patcher}."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yuppiepsycho-zip
+          path: |
+            dist/yuppiepsycho.zip
+            dist/yuppiepsycho.zip.sha256
